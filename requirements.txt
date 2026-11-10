@@ -1,0 +1,7 @@
+# MediaPipe の Face Mesh（mp.solutions.face_mesh）を使うため、それが含まれる版に固定している
+mediapipe==0.10.21
+# mediapipe が opencv-contrib-python に依存するため、opencv-python ではなくこちらを使う
+opencv-contrib-python==4.10.0.84
+numpy==1.26.4
+PyOpenGL==3.1.7
+glfw==2.7.0
