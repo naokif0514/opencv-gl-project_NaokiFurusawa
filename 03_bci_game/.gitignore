@@ -1,0 +1,4 @@
+# 脳のデータ（FreeSurfer の fsaverage5 と Destrieux アトラス）は再配布せず、初回起動時に取得する
+assets/nilearn_data/
+assets/brain_fsaverage5.npz
+logs/*.csv

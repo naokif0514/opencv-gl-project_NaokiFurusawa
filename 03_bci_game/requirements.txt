@@ -1,0 +1,12 @@
+# 一番上の階層の .venv を 01・02 と共用する
+# ---- 02_pseudo_bci と同じもの ----
+mediapipe==0.10.21
+opencv-contrib-python==4.10.0.84
+numpy==1.26.4
+PyOpenGL==3.1.7
+glfw==2.7.0
+# ---- 03_bci_game で追加 ----
+# 標準脳 fsaverage5 と Destrieux アトラスの取得（初回だけ使う。2 回目以降は assets/ のキャッシュを読む）
+# numpy を 1.26.4 のまま入れるため、インストールは次のようにする：
+#   .venv/bin/pip install -r 03_bci_game/requirements.txt
+nilearn==0.14.1
