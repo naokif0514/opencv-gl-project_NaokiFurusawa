@@ -6,33 +6,23 @@ OpenCV（カメラ取得・画像処理・頭部姿勢推定）と OpenGL（シ�
 > 現在は **最小構成**（カメラ → 集中度の数値表示 → 脳が集中度で光る）までの実装です。
 > パーティクル・シナプス・成長の表現は次の段階で追加します。
 
-## セットアップ（Ubuntu 24.04 / Python 3.10 以上）
+## セットアップ
+
+仮想環境 `.venv` は一番上の階層（`opencv-gl-project_NaokiFurusawa/.venv`）に置き、2 つの作品で共用しています。
+作り方は一番上の階層の README.md を見てください。この作品に必要なライブラリは次のコマンドで入ります。
 
 ```bash
 cd opencv-gl-project_NaokiFurusawa
-
-# 仮想環境を作ってライブラリを入れる
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r 01_focus_brain/requirements.txt
 ```
-
-`python3 -m venv` が「ensurepip is not available」で失敗する場合は、次のどちらかを行ってください。
-
-- `sudo apt install python3.12-venv` を実行してから、もう一度 `python3 -m venv .venv` を実行する
-- sudo が使えない場合は、pip なしで仮想環境を作り、公式の get-pip.py で pip を入れる
-  ```bash
-  python3 -m venv --without-pip .venv
-  python3 -c "import urllib.request; urllib.request.urlretrieve('https://bootstrap.pypa.io/get-pip.py', '/tmp/get-pip.py')"
-  .venv/bin/python /tmp/get-pip.py
-  .venv/bin/pip install -r requirements.txt
-  ```
 
 ## 実行
 
 ```bash
-.venv/bin/python main.py              # カメラを使って起動
-.venv/bin/python main.py --no-camera  # カメラなし（テストモード）で起動
-.venv/bin/python main.py --camera 1   # 0 番以外のカメラを使う
+cd 01_focus_brain
+../.venv/bin/python main.py              # カメラを使って起動
+../.venv/bin/python main.py --no-camera  # カメラなし（テストモード）で起動
+../.venv/bin/python main.py --camera 1   # 0 番以外のカメラを使う
 ```
 
 カメラが見つからない場合は、自動的にテストモードで起動します。

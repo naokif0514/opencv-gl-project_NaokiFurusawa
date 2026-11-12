@@ -1,0 +1,49 @@
+# OpenCV × OpenGL 作品集
+
+OpenCV（カメラ・画像処理）と OpenGL（シェーダーによる 3D 描画）を組み合わせた作品を 2 つ収めています。
+
+| フォルダ | 作品 | 概要 |
+|---|---|---|
+| [01_focus_brain/](01_focus_brain/) | Focus Brain | Web カメラで顔と目を追跡し（MediaPipe Face Mesh）、まばたき・目の開き・顔の向き・視線の安定性から「集中度」を推定する。集中度に応じて 3D の脳が光る |
+| [02_pseudo_bci/](02_pseudo_bci/) | Pseudo BCI Decoder | Web カメラで手を追跡し（MediaPipe Hands）、その動きに応じて運動野ニューロン集団の発火をシミュレーションする。発火パターンだけから手の動きをデコードしてカーソルを動かす |
+
+くわしい説明・キー操作は、それぞれのフォルダの README.md にあります。
+
+## セットアップ（初回のみ）
+
+2 つの作品で、一番上の階層の仮想環境 `.venv` を共用します。
+
+```bash
+cd opencv-gl-project_NaokiFurusawa
+python3 -m venv .venv
+.venv/bin/pip install -r 01_focus_brain/requirements.txt -r 02_pseudo_bci/requirements.txt
+```
+
+`python3 -m venv` が「ensurepip is not available」で失敗する場合は、次のどちらかを行ってください。
+
+- `sudo apt install python3.12-venv` を実行してから、もう一度 `python3 -m venv .venv` を実行する
+- sudo が使えない場合は、pip なしで仮想環境を作り、公式の get-pip.py で pip を入れる
+  ```bash
+  python3 -m venv --without-pip .venv
+  python3 -c "import urllib.request; urllib.request.urlretrieve('https://bootstrap.pypa.io/get-pip.py', '/tmp/get-pip.py')"
+  .venv/bin/python /tmp/get-pip.py
+  .venv/bin/pip install -r 01_focus_brain/requirements.txt -r 02_pseudo_bci/requirements.txt
+  ```
+
+## 起動
+
+```bash
+# 01：集中度で光る 3D の脳
+cd 01_focus_brain && ../.venv/bin/python main.py
+
+# 02：擬似 BCI デコーダ体験
+cd 02_pseudo_bci && ../.venv/bin/python main.py
+```
+
+どちらも、カメラが見つからない場合はテストモード（キーやマウスで操作）で起動します。
+ログ（CSV）は、それぞれのフォルダの `logs/` に保存されます。
+
+## 動作環境についての注意
+
+- Ubuntu の Wayland 環境では、glfw（Wayland 版）が異常終了したり、PyOpenGL がコンテキストを見つけられなかったりします。そのため、各 `main.py` の先頭で環境変数を設定し、X11 互換モード（XWayland）でウィンドウを開いています。
+- GPU が使えない環境ではソフトウェア描画（llvmpipe）になります。描画が重い場合は、各フォルダの `config.py` にある品質の設定（`MSAA_SAMPLES` など）を下げてください。

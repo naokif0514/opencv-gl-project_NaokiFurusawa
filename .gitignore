@@ -1,4 +1,5 @@
 .venv/
 __pycache__/
 *.pyc
-logs/*.csv
+# 各作品の logs/ に保存される CSV
+*/logs/*.csv
