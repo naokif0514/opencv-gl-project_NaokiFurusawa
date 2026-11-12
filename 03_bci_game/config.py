@@ -52,7 +52,9 @@ RIDGE_ALPHA = 0.5             # 線形デコーダの正則化の強さ
 # ============================================================
 # 脳の表示（brain_model.py / brain_renderer.py）
 # ============================================================
-BRAIN_SURFACE = "pial"        # "pial"（本物の脳のしわ）/ "infl"（ふくらませた表面。溝の中も見える）
+BRAIN_SURFACE = "pial"        # テスト画面の最初の表面："pial"（本物の脳のしわ）/ "infl"（ふくらませた表面）
+MORPH_SEC = 2.0               # pial ⇔ inflated の変形アニメーションの時間 [秒]
+FALLBACK_SUBDIV = 4           # 簡易モデル（標準脳データがないとき）の楕円体の細かさ（4 で片半球 2562 頂点）
 HAND_KNOB_RADIUS = 16.0       # 手の領域（hand knob）とみなす範囲：中心からの距離 [mm]
 FEF_POSTERIOR_FRACTION = 0.30 # 中前頭回の後ろ側この割合を「前頭眼野のあたり」とする
 NEURON_RADIUS_MM = 0.75       # 擬似ニューロンの球の半径 [mm]

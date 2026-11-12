@@ -13,7 +13,7 @@ brain_test.py
     ../.venv/bin/python brain_test.py --test   # マウスを手の代わりにする
 
 キー：1 運動野 / 2 体性感覚野 / 3 前頭眼野 / 4 視覚野（押すたびに点灯・消灯）、0 すべて消す、
-      Z 手の領域に寄る・戻る、↑/↓ ニューロン数、N/M ノイズ、K 脱落、T テストモード、D デバッグ窓、ESC 終了
+      I pial ⇔ inflated（変形アニメーション）、Z 手の領域に寄る・戻る、↑/↓ ニューロン数、N/M ノイズ、K 脱落、T テストモード、D デバッグ窓、ESC 終了
 マウス：脳の上でドラッグ = 回転、ホイール = 拡大縮小。テストモードでは右下の「hand pad」の上でマウスを動かす
 """
 
@@ -38,12 +38,13 @@ import numpy as np   # noqa: E402
 from OpenGL import GL as gl   # noqa: E402
 
 import config        # noqa: E402
-from brain_model import REGION_ID, BrainModel                  # noqa: E402
+from brain_model import REGION_ID, WARNING_TEXT, WARNING_TEXT_EN, BrainModel, vertex_normals   # noqa: E402
 from brain_renderer import REGION_COLORS, BrainView            # noqa: E402
 from decoder import PopulationVectorDecoder, RateEstimator     # noqa: E402
 from gfx2d import Batch2D, TexturedQuad, rgb255                # noqa: E402
 from gl_utils import hue_to_rgb                                # noqa: E402
 from hand_tracker import HandTracker, MouseHand                # noqa: E402
+from jtext import JText                                        # noqa: E402
 from neuron_model import NeuronPopulation                      # noqa: E402
 
 W, H = config.WINDOW_WIDTH, config.WINDOW_HEIGHT
@@ -110,6 +111,7 @@ class BrainTest:
         self.raster_quad = TexturedQuad(gl.GL_NEAREST)
         self.overlay_img = np.zeros((H, W, 4), dtype=np.uint8)
         self._last_overlay = -1.0
+        self.jtext = JText()
         self._region_anchor()
 
         self.manual = set()           # キーで点灯させている領域
@@ -119,16 +121,20 @@ class BrainTest:
 
     # --------------------------------------------------------
     def _region_anchor(self):
-        """各領域の代表点と向き（ラベルを書く位置）。左半球の領域の重心を使う"""
+        """
+        各領域の代表点と向き（ラベルを書く位置）。左半球の領域の重心を、pial と inflated の両方で求めておき、
+        描くときに今の変形の割合で混ぜる（変形中もラベルが表面に乗ったまま動く）
+        """
         h = self.model.hemis["left"]
-        from brain_model import vertex_normals
-        normals = vertex_normals(h[config.BRAIN_SURFACE], h["faces"])
         self.anchors = {}
         for name in REGION_COLORS:
             idx = self.model.region_vertices("left", name)
-            p = self.brain.to_gl(h[config.BRAIN_SURFACE][idx].mean(axis=0) + self.brain.shift["left"])
-            n = self.brain.dir_to_gl(normals[idx].mean(axis=0))
-            self.anchors[name] = (p, n / np.linalg.norm(n))
+            pair = []
+            for surf in ("pial", "infl"):
+                v = self.brain.surface_coords("left", surf)
+                n = self.brain.dir_to_gl(vertex_normals(v, h["faces"])[idx].mean(axis=0))
+                pair.append((self.brain.to_gl(v[idx].mean(axis=0)), n / np.linalg.norm(n)))
+            self.anchors[name] = pair
 
     def build_population(self):
         self.pop = NeuronPopulation(self.n, self.rng)
@@ -158,6 +164,8 @@ class BrainTest:
             self.manual.clear()
         elif key == glfw.KEY_Z and action == glfw.PRESS:
             self.brain.toggle_focus()
+        elif key == glfw.KEY_I and action == glfw.PRESS:
+            self.brain.toggle_surface()
         elif key == glfw.KEY_UP:
             self.n = min(config.N_MAX, self.n + config.N_STEP)
             self.build_population()
@@ -346,7 +354,8 @@ class BrainTest:
         # ---- 光っている領域のラベル（脳の上。こちらを向いている領域だけ）----
         bx, by, bw, bh = BRAIN_VP
         eye = self.brain.camera.eye
-        for name, (p, n) in self.anchors.items():
+        for name, ((p0, n0), (p1, n1)) in self.anchors.items():
+            p, n = self.brain.mix(p0, p1), self.brain.mix(n0, n1)
             g = self.brain.glow[REGION_ID[name]]
             if g < 0.3 or name == "hand":
                 continue
@@ -370,7 +379,12 @@ class BrainTest:
         # ---- 右のパネル ----
         x = PANEL_X
         T(img, "BRAIN TEST (stage 1)", x, 32, 0.6, (255, 255, 255))
-        T(img, f"fsaverage5 {config.BRAIN_SURFACE} + Destrieux atlas", x, 54, 0.42, dim)
+        surf = "pial" if self.brain.morph_goal < 0.5 else "inflated"
+        if self.brain.morphing:
+            surf = f"-> {surf} {self.brain.morph:.0%}" if self.brain.morph_goal > 0.5 else \
+                f"-> {surf} {1 - self.brain.morph:.0%}"
+        model = "simplified model" if self.model.simplified else "fsaverage5+Destrieux"
+        T(img, f"{model}  surface: {surf}", x, 54, 0.42, dim)
         mode = "TEST MODE (mouse on hand pad)" if self.test_mode else "CAMERA MODE (hand tracking)"
         T(img, mode, x, 80, 0.45, (255, 200, 110) if self.test_mode else (140, 230, 160))
         T(img, "hand: detected" if hand.detected else "hand: NOT FOUND (v = 0)", x, 102, 0.45,
@@ -388,8 +402,8 @@ class BrainTest:
             T(img, f"[{key}] {REGION_LABELS[name]}", x + 6, y, 0.48, c if (on or g > 0.3) else dim)
             cv2.rectangle(img, (x + 250, y - 11), (x + 250 + int(120 * g), y - 1), (*c, 255), -1)
             cv2.rectangle(img, (x + 250, y - 11), (x + 370, y - 1), (90, 100, 120, 255), 1)
-        T(img, "0 all off   Z zoom hand knob   drag rotate   wheel zoom", x, y + 26, 0.4, dim)
-        T(img, "UP/DOWN neurons  N/M noise  K dropout  T test  D debug  ESC", x, y + 46, 0.4, dim)
+        T(img, "0 off  I pial/inflated  Z zoom hand  drag/wheel view", x, y + 26, 0.4, dim)
+        T(img, "UP/DOWN neurons  N/M noise  K dropout  T test  D debug", x, y + 46, 0.4, dim)
 
         T(img, "velocity", COMPASS[0] - 30, COMPASS[1] - COMPASS[2] - 10, 0.42, dim)
         T(img, "white true / yellow PV", COMPASS[0] - 50, COMPASS[1] + COMPASS[2] + 18, 0.38, dim)
@@ -403,6 +417,12 @@ class BrainTest:
         T(img, "#0", 10, ry + rh, 0.4, dim)
         T(img, "Left hemisphere: neurons on the hand knob of M1 (right hand -> left hemisphere)",
           14, 30, 0.45, (200, 205, 220))
+        if self.model.simplified:      # 標準脳データがないときの警告
+            cv2.rectangle(img, (10, 44), (520, 76), (90, 30, 10, 220), -1)
+            if self.jtext.available:
+                self.jtext.draw(img, "！ " + WARNING_TEXT, 20, 48, 20, (255, 210, 120))
+            else:
+                T(img, "! " + WARNING_TEXT_EN, 20, 66, 0.48, (255, 210, 120))
 
 
 def main():

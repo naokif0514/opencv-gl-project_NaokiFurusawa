@@ -10,6 +10,9 @@ brain_renderer.py
       このゲームでは右手で操作する想定なので、ニューロンを左半球の手の領域（hand knob）に置いている
   ・カメラはゆっくり自動で回り、マウスのドラッグで回転・ホイールで拡大縮小できる。
     Z キーで手の領域に寄る（ニューロンが小さいので、寄ると発火の様子がよく見える）
+  ・pial（本物のしわ）と inflated（ふくらませた表面）を、頂点ごとに補間してなめらかに変形させる
+    （set_surface）。頂点データに両方の位置を入れておき、頂点シェーダーで uMorph（0〜1）に応じて混ぜる。
+    ニューロンも両方の表面での位置を持っているので、変形中も表面に乗ったまま動く
 
 座標の変換：脳の座標（mm、x：右、y：前、z：上）→ OpenGL（x：右、y：上、z：手前）
     gl = ((x − cx), (z − cz), −(y − cy)) / 100      （回転なので、三角形の向きは変わらない）
@@ -95,38 +98,72 @@ class BrainView:
         self.shader = ShaderProgram("brain.vert", "brain.frag")
         self.neuron_shader = ShaderProgram("neuron.vert", "neuron.frag")
         self.camera = OrbitCamera()
-        surf = config.BRAIN_SURFACE
 
         # 両半球の頂点をまとめて中心を求める（pial の座標で）
         allv = np.vstack([model.hemis[h]["pial"] for h in ("left", "right")])
         self.center = (allv.min(axis=0) + allv.max(axis=0)) / 2.0
 
-        # ふくらませた表面（infl）は半球ごとに原点のまわりにあるので、左右に離して並べる（そのずらし量）
-        self.shift = {}
+        # inflated は半球ごとに原点のまわりにあるので、左右に離して並べる（そのずらし量）
+        self.shift = {"pial": {"left": np.zeros(3), "right": np.zeros(3)}, "infl": {}}
         for hemi in ("left", "right"):
-            v = model.hemis[hemi][surf].astype(np.float64)
-            self.shift[hemi] = (-v.mean(axis=0) + np.array([-45.0 if hemi == "left" else 45.0, 0, 0])
-                                + self.center) if surf == "infl" else np.zeros(3)
+            v = model.hemis[hemi]["infl"].astype(np.float64)
+            self.shift["infl"][hemi] = -v.mean(axis=0) + np.array([-45.0 if hemi == "left" else 45.0, 0, 0]) \
+                + self.center
 
+        # 頂点データ：pial の位置・法線、溝の深さ、領域、inflated の位置・法線（14 個の float）
         self.meshes = []
         for hemi in ("left", "right"):
             h = model.hemis[hemi]
-            v = h[surf].astype(np.float64) + self.shift[hemi]
-            n = vertex_normals(v, h["faces"])
-            data = np.hstack([self.to_gl(v), self.dir_to_gl(n), h["sulc"][:, None],
-                              h["region"][:, None].astype(np.float32)]).astype(np.float32)
+            cols = []
+            for surf in ("pial", "infl"):
+                v = self.surface_coords(hemi, surf)
+                cols.append((self.to_gl(v), self.dir_to_gl(vertex_normals(v, h["faces"]))))
+            data = np.hstack([cols[0][0], cols[0][1], h["sulc"][:, None], h["region"][:, None].astype(np.float32),
+                              cols[1][0], cols[1][1]]).astype(np.float32)
             self.meshes.append(self._upload_mesh(data, h["faces"].astype(np.uint32).ravel()))
 
-        # 手の領域の中心（Z キーで寄るときの注視点）
+        # 手の領域の中心（Z キーで寄るときの注視点）。pial と inflated の両方で求めておく
         hv = model.region_vertices("left", "hand")
-        self.hand_center = self.to_gl(model.hemis["left"][surf][hv].mean(axis=0) + self.shift["left"])
+        self.hand_center = {s: self.to_gl(self.surface_coords("left", s)[hv].mean(axis=0)) for s in ("pial", "infl")}
         self.focus_hand = False
+
+        # 変形の状態：morph 0 = pial、1 = inflated（表示には smoothstep でなめらかにした値を使う）
+        self.morph = 1.0 if config.BRAIN_SURFACE == "infl" else 0.0
+        self.morph_goal = self.morph
 
         self._init_neuron_buffers()
         self.glow = np.zeros(6)
         self.n_neurons = 0
 
     # --------------------------------------------------------
+    def surface_coords(self, hemi, surf):
+        """表示に使う、その表面の頂点の位置 [mm]（inflated は左右に離したもの）"""
+        return self.model.hemis[hemi][surf].astype(np.float64) + self.shift[surf][hemi]
+
+    def set_surface(self, surf, animate=True):
+        """表示する表面を "pial" / "infl" にする。animate なら MORPH_SEC 秒かけて変形する"""
+        self.morph_goal = 1.0 if surf == "infl" else 0.0
+        if not animate:
+            self.morph = self.morph_goal
+
+    def toggle_surface(self):
+        self.set_surface("pial" if self.morph_goal > 0.5 else "infl")
+
+    @property
+    def morphing(self):
+        return abs(self.morph - self.morph_goal) > 1e-6
+
+    @property
+    def morph_value(self):
+        """表示用の変形の割合（ゆっくり始まってゆっくり止まる）"""
+        m = self.morph
+        return m * m * (3 - 2 * m)
+
+    def mix(self, pial_value, infl_value):
+        """pial と inflated での値（位置など）を、今の変形の割合で混ぜる"""
+        m = self.morph_value
+        return (1 - m) * np.asarray(pial_value) + m * np.asarray(infl_value)
+
     def to_gl(self, p):
         p = np.asarray(p, dtype=np.float64) - self.center
         return (np.stack([p[..., 0], p[..., 2], -p[..., 1]], axis=-1) * MM).astype(np.float32)
@@ -143,8 +180,8 @@ class BrainView:
         vbo = gl.glGenBuffers(1)
         gl.glBindBuffer(gl.GL_ARRAY_BUFFER, vbo)
         gl.glBufferData(gl.GL_ARRAY_BUFFER, data.nbytes, data, gl.GL_STATIC_DRAW)
-        stride = 8 * 4
-        for loc, size, off in ((0, 3, 0), (1, 3, 12), (2, 1, 24), (3, 1, 28)):
+        stride = 14 * 4
+        for loc, size, off in ((0, 3, 0), (1, 3, 12), (2, 1, 24), (3, 1, 28), (4, 3, 32), (5, 3, 44)):
             gl.glEnableVertexAttribArray(loc)
             gl.glVertexAttribPointer(loc, size, gl.GL_FLOAT, gl.GL_FALSE, stride, ctypes.c_void_p(off))
         ebo = gl.glGenBuffers(1)
@@ -169,7 +206,7 @@ class BrainView:
         gl.glBufferData(gl.GL_ELEMENT_ARRAY_BUFFER, sphere_i.nbytes, sphere_i, gl.GL_STATIC_DRAW)
         self.inst = {}
         for loc, name, size in ((1, "offset", 3), (2, "color", 3), (3, "flash", 1), (4, "alive", 1),
-                                (5, "activity", 1)):
+                                (5, "activity", 1), (6, "offset2", 3)):
             b = gl.glGenBuffers(1)
             gl.glBindBuffer(gl.GL_ARRAY_BUFFER, b)
             gl.glEnableVertexAttribArray(loc)
@@ -188,10 +225,12 @@ class BrainView:
         擬似ニューロンを左半球の手の領域の表面上にランダムに置く（三角形の面積に比例した一様分布）。
         実際の M1 では好きな方向がきれいな地図状には並んでいないので、置き場所と PD は無関係にしている
         """
-        pos, normal = self.model.sample_hand_points(pop.n, rng, config.BRAIN_SURFACE)
-        pos = pos + normal * config.NEURON_LIFT_MM + self.shift["left"]
+        pts = self.model.sample_hand_points(pop.n, rng)
+        for surf, name in (("pial", "offset"), ("infl", "offset2")):
+            pos, normal = pts[surf]
+            pos = pos + normal * config.NEURON_LIFT_MM + self.shift[surf]["left"]
+            self._upload(name, self.to_gl(pos))
         self.n_neurons = pop.n
-        self._upload("offset", self.to_gl(pos))
         self._upload("color", hue_to_rgb(pop.pd_angle / (2 * np.pi)))
         self._upload("flash", np.zeros(pop.n))
         self._upload("alive", np.ones(pop.n))
@@ -199,10 +238,19 @@ class BrainView:
 
     def toggle_focus(self):
         self.focus_hand = not self.focus_hand
-        if self.focus_hand:
-            self.camera.focus(self.hand_center, 0.55)
-        else:
+        if not self.focus_hand:
             self.camera.focus(np.zeros(3), 3.3)
+
+    def update(self, dt):
+        """変形とカメラを進める（毎フレーム 1 回）"""
+        step = dt / max(config.MORPH_SEC, 1e-6)
+        if self.morph < self.morph_goal:
+            self.morph = min(self.morph_goal, self.morph + step)
+        elif self.morph > self.morph_goal:
+            self.morph = max(self.morph_goal, self.morph - step)
+        if self.focus_hand:      # 変形中も、手の領域の今の位置を追いかける
+            self.camera.focus(self.mix(self.hand_center["pial"], self.hand_center["infl"]), 0.55)
+        self.camera.update(dt)
 
     # --------------------------------------------------------
     def update_glow(self, targets, dt):
@@ -216,7 +264,7 @@ class BrainView:
     def draw(self, viewport, t, dt, flash=None, activity=None, alive=None):
         gl.glViewport(*viewport)
         gl.glEnable(gl.GL_DEPTH_TEST)
-        self.camera.update(dt)
+        self.update(dt)
         view, proj = self.camera.matrices(viewport[2] / viewport[3])
         eye = self.camera.eye
         light = eye / np.linalg.norm(eye) + np.array([0.3, 0.8, 0.0])     # カメラ側の斜め上から照らす
@@ -229,6 +277,7 @@ class BrainView:
         s.set_vec3("uLightDir", light)
         s.set_float("uHint", 0.16)
         s.set_float("uTime", t)
+        s.set_float("uMorph", self.morph_value)
         gl.glUniform1fv(s.loc("uGlow"), 6, np.asarray(self.glow, dtype=np.float32))
         colors = np.zeros((6, 3), dtype=np.float32)
         for name, c in REGION_COLORS.items():
@@ -249,6 +298,7 @@ class BrainView:
             ns.set_vec3("uCamPos", eye)
             ns.set_vec3("uLightDir", light)
             ns.set_float("uRadius", config.NEURON_RADIUS_MM * MM)
+            ns.set_float("uMorph", self.morph_value)
             gl.glBindVertexArray(self.nvao)
             gl.glDrawElementsInstanced(gl.GL_TRIANGLES, self.sphere_count, gl.GL_UNSIGNED_INT, None,
                                        self.n_neurons)
