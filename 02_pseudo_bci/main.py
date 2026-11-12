@@ -21,6 +21,8 @@ main.py
     ../.venv/bin/python main.py              # カメラで手を追跡
     ../.venv/bin/python main.py --test       # マウスで操作（テストモード）
     ../.venv/bin/python main.py --camera 1   # 別のカメラを使う
+    ../.venv/bin/python main.py --experiment [--trials 20] [--only neurons,noise,dropout,assumptions]
+                                             # 画面なしの自動実験モード（experiment.py）。results/ に保存
 """
 
 import argparse
@@ -35,6 +37,11 @@ import time
 os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 os.environ.setdefault("PYGLFW_LIBRARY_VARIANT", "x11")
 os.environ.setdefault("PYOPENGL_PLATFORM", "glx")
+if "--experiment" in sys.argv:
+    # 実験モードは小さな行列計算を大量にくり返すので、数値計算ライブラリのマルチスレッドは
+    # かえって遅くなる（スレッドの奪い合い）。numpy を読み込む前に 1 スレッドにしておく
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import cv2           # noqa: E402
 import glfw          # noqa: E402
@@ -351,7 +358,15 @@ def main():
     parser = argparse.ArgumentParser(description="擬似 BCI デコーダ体験")
     parser.add_argument("--camera", type=int, default=config.CAMERA_INDEX, help="カメラ番号")
     parser.add_argument("--test", action="store_true", help="カメラを使わず、マウスを手の代わりにする")
-    args = parser.parse_args()
+    parser.add_argument("--experiment", action="store_true",
+                        help="画面なしの自動実験モード（残りの引数は experiment.py に渡す。例：--trials 20）")
+    args, rest = parser.parse_known_args()
+    if args.experiment:
+        import experiment
+        experiment.main(rest)
+        return
+    if rest:
+        parser.error(f"不明な引数: {' '.join(rest)}")
     App(args).run()
 
 

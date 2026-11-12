@@ -101,6 +101,20 @@ class RateEstimator:
         return self.rate_hat
 
 
+def rates_from_counts(counts, dt=config.DT):
+    """
+    スパイク数の時系列 (T, N) から、各時刻の推定発火率 (T, N) をまとめて求める（実験モード用）。
+    RateEstimator.step() を順に呼んだのと同じ結果（最初の数ビンは、そこまでのビンだけで割る）。
+    """
+    counts = np.asarray(counts, dtype=np.float64)
+    w = max(1, int(round(config.DECODE_WINDOW / config.DT)))
+    csum = np.cumsum(counts, axis=0)
+    out = csum.copy()
+    out[w:] -= csum[:-w]
+    n_bins = np.minimum(np.arange(1, len(counts) + 1), w)[:, None]
+    return out / (n_bins * dt)
+
+
 # ============================================================
 # 3. カーソル（推定速度の積分）。各デコーダの共通部分
 # ============================================================

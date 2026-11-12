@@ -5,7 +5,7 @@ OpenCV（カメラ・画像処理）と OpenGL（シェーダーによる 3D 描
 | フォルダ | 作品 | 概要 |
 |---|---|---|
 | [01_focus_brain/](01_focus_brain/) | Focus Brain | Web カメラで顔と目を追跡し（MediaPipe Face Mesh）、まばたき・目の開き・顔の向き・視線の安定性から「集中度」を推定する。集中度に応じて 3D の脳が光る |
-| [02_pseudo_bci/](02_pseudo_bci/) | Pseudo BCI Decoder | Web カメラで手を追跡し（MediaPipe Hands）、その動きに応じて運動野ニューロン集団の発火をシミュレーションする。発火パターンだけから手の動きをデコードしてカーソルを動かす |
+| [02_pseudo_bci/](02_pseudo_bci/) | Pseudo BCI Decoder | Web カメラで手を追跡し（MediaPipe Hands）、その動きに応じて運動野ニューロン集団の発火をシミュレーションする。発火パターンだけから手の動きをデコード（PV 法・線形デコーダ）してカーソルとロボットアームを動かす。自動実験モードでデコーダの性質を比べられる |
 
 くわしい説明・キー操作は、それぞれのフォルダの README.md にあります。
 
@@ -38,6 +38,9 @@ cd 01_focus_brain && ../.venv/bin/python main.py
 
 # 02：擬似 BCI デコーダ体験
 cd 02_pseudo_bci && ../.venv/bin/python main.py
+
+# 02 の自動実験モード（画面なし。約 30 秒で results/ に CSV とグラフを保存）
+cd 02_pseudo_bci && ../.venv/bin/python main.py --experiment
 ```
 
 どちらも、カメラが見つからない場合はテストモード（キーやマウスで操作）で起動します。

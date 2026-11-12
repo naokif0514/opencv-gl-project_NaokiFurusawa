@@ -1,4 +1,4 @@
-# 01_focus_brain と同じ .venv を共用する。追加で必要なパッケージはない
+# 01_focus_brain と同じ .venv を共用する
 # MediaPipe の Hands（mp.solutions.hands）を使うため、solutions API が含まれる版に固定している
 mediapipe==0.10.21
 # mediapipe が opencv-contrib-python に依存するため、opencv-python ではなくこちらを使う
@@ -6,3 +6,5 @@ opencv-contrib-python==4.10.0.84
 numpy==1.26.4
 PyOpenGL==3.1.7
 glfw==2.7.0
+# 実験モードのグラフ（mediapipe の依存として入っているが、直接使うので明記する）
+matplotlib==3.11.2

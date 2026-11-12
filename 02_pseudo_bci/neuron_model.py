@@ -58,6 +58,13 @@ neuron_model.py
 ■ ニューロンごとのばらつき
   実際のニューロンは b0・m が 1 つ 1 つ違う。ここでも ±TUNING_HETEROGENEITY の割合でばらつかせる。
   ポピュレーションベクトル法のデコーダは、全員が平均的な b0・m を持つと仮定して推定する。
+
+■ 好きな方向（PD）の分布
+  ふつうは円周上に一様にランダムに割り当てる（pd_bias = 0）。
+  実験モードでは「PV 法の前提が崩れた条件」として、pd_bias の割合のニューロンの PD を
+  右方向（0°）のまわり（標準偏差 PD_BIAS_SPREAD_DEG）に集中させる。実際の M1 でも、記録できた
+  ニューロンの PD は一様とは限らず、かたよりがあると PV 法の推定はその方向へ引っぱられる
+  （Salinas & Abbott 1994 などが指摘し、最適線形推定（OLE）で補正できることが示された）。
 """
 
 import numpy as np
@@ -70,17 +77,26 @@ NOISE_TYPES = ("drift", "independent", "both")
 class NeuronPopulation:
     """運動野ニューロン集団"""
 
-    def __init__(self, n, rng=None):
+    def __init__(self, n, rng=None, heterogeneity=config.TUNING_HETEROGENEITY, pd_bias=0.0):
+        """
+        n             : ニューロン数
+        heterogeneity : b0・m のばらつきの割合（0.15 なら ±15% の一様分布）
+        pd_bias       : PD を右方向付近に集中させるニューロンの割合（0 なら全員一様）
+        """
         self.rng = rng if rng is not None else np.random.default_rng()
         self.n = n
 
         # 好きな方向（PD）を円周上にランダムに割り当てる。
         # 番号順に並べ替えておくと、ラスタープロットで「方向ごとの帯」が見やすくなる
-        self.pd_angle = np.sort(self.rng.uniform(0.0, 2.0 * np.pi, n))
+        angle = self.rng.uniform(0.0, 2.0 * np.pi, n)
+        k = int(round(n * pd_bias))
+        if k > 0:
+            angle[:k] = self.rng.normal(0.0, np.radians(config.PD_BIAS_SPREAD_DEG), k)
+        self.pd_angle = np.sort(np.mod(angle, 2.0 * np.pi))
         self.pd = np.stack([np.cos(self.pd_angle), np.sin(self.pd_angle)], axis=1)   # 単位ベクトル (n,2)
 
         # ニューロンごとのばらつき
-        h = config.TUNING_HETEROGENEITY
+        h = heterogeneity
         self.b0 = config.BASE_RATE * (1.0 + h * self.rng.uniform(-1, 1, n))
         self.m = config.MODULATION * (1.0 + h * self.rng.uniform(-1, 1, n))
 
@@ -120,6 +136,31 @@ class NeuronPopulation:
         self.counts = self.rng.poisson(self.rate * dt).astype(np.int32)
         self.counts[~self.alive] = 0
         return self.counts
+
+    def run(self, V, dt=config.DT):
+        """
+        速度の時系列 V (T, 2) をまとめて入力し、スパイク数 (T, n) を返す（実験モード用）。
+        step() を T 回呼ぶのと同じ式だが、行列でまとめて計算するので速い。
+        """
+        V = np.asarray(V, dtype=np.float64)
+        T = len(V)
+        tau = config.NOISE_TAU
+        rate = self.b0 + (V @ self.pd.T) * self.m                     # (T, n)
+        if self.noise_type in ("drift", "both"):
+            xi = np.empty((T, self.n))
+            a, b = 1.0 - dt / tau, np.sqrt(2.0 * dt / tau)
+            eps = self.rng.normal(size=(T, self.n))
+            x = self.xi
+            for t in range(T):                                         # OU 過程は 1 ステップずつ
+                x = a * x + b * eps[t]
+                xi[t] = x
+            self.xi = x
+            rate += self.noise_std * xi
+        if self.noise_type in ("independent", "both"):
+            rate += self.noise_std * self.rng.normal(size=(T, self.n))
+        counts = self.rng.poisson(np.maximum(rate, 0.0) * dt)
+        counts[:, ~self.alive] = 0
+        return counts
 
     # --------------------------------------------------------
     def dropout(self, fraction=config.DROPOUT_FRACTION):
