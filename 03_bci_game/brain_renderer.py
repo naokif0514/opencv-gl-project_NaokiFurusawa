@@ -52,6 +52,8 @@ class OrbitCamera:
         self.goal_dist = 3.3
         self.drag = None           # ドラッグ開始時の (マウス x, y, yaw, pitch)
         self.idle = 0.0            # 最後にマウスで操作してからの時間（しばらくは自動回転しない）
+        self.sway = None           # (中心の yaw, 振れ幅) を入れると、一回転せずにその向きのまわりで左右に揺れる
+        self.sway_t = 0.0
 
     def mouse_down(self, x, y):
         self.drag = (x, y, self.yaw, self.pitch)
@@ -77,7 +79,13 @@ class OrbitCamera:
     def update(self, dt):
         self.idle += dt
         if self.drag is None and self.idle > 3.0:
-            self.yaw += config.BRAIN_AUTO_ROTATE * dt
+            if self.sway is None:
+                self.yaw += config.BRAIN_AUTO_ROTATE * dt
+            else:      # ゲーム中：左半球の外側（運動野・前頭眼野）が見える向きのまわりでゆっくり揺れる
+                self.sway_t += dt
+                center, amp = self.sway
+                goal = center + amp * math.sin(self.sway_t * 2 * math.pi / 24.0)
+                self.yaw += (goal - self.yaw) * min(1.0, dt * 2.0)
         k = 1.0 - math.exp(-dt / 0.35)                 # 注視点と距離はなめらかに近づける
         self.target += (self.goal_target - self.target) * k
         self.dist += (self.goal_dist - self.dist) * k
