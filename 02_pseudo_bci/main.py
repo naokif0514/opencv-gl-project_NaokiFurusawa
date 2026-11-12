@@ -8,7 +8,10 @@ main.py
   1. hand_tracker.py  : カメラ（別スレッド）で手の位置と速度を求める。テストモードではマウスを使う
   2. neuron_model.py  : その速度から、運動野ニューロン集団のスパイクを 20 ms ごとに生成する
   3. decoder.py       : スパイク数だけから速度を推定し、カーソルを動かす。精度（相関・RMSE）も計算
-  4. renderer.py      : 3D のニューロン、手とカーソルの比較、ラスタープロット、HUD を描く
+                        ポピュレーションベクトル法（PV）と線形デコーダ（LIN）の 2 つを常に同時に動かす
+     calibration.py   : 線形デコーダを学習するためのキャリブレーション課題（ターゲットを手で追う）
+     robot_arm.py     : カーソルを手先の目標として、2 関節アームの角度を逆運動学で求める
+  4. renderer.py      : 3D のニューロン、手とカーソルの比較、アーム、ラスタープロット、HUD を描く
 
 シミュレーションは描画のフレームレートと関係なく、実時間に合わせて 20 ms 刻みで進める
 （描画が 1 フレーム 40 ms かかったら、そのフレームで 2 ステップ進める）。
@@ -38,14 +41,18 @@ import glfw          # noqa: E402
 import numpy as np   # noqa: E402
 
 import config        # noqa: E402
-from decoder import DecodingMetrics, PopulationVectorDecoder   # noqa: E402
+from calibration import CalibrationTask                         # noqa: E402
+from decoder import (DecodingMetrics, LinearDecoder,             # noqa: E402
+                     PopulationVectorDecoder, RateEstimator)
 from hand_tracker import HandTracker, MouseHand                # noqa: E402
-from neuron_model import NeuronPopulation                      # noqa: E402
+from neuron_model import NOISE_TYPES, NeuronPopulation         # noqa: E402
+from robot_arm import TwoLinkArm                               # noqa: E402
 from renderer import PANEL, PANEL_X, PANEL_Y, Renderer          # noqa: E402
 from session_logger import SessionLogger                        # noqa: E402
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEBUG_WINDOW = "Hand Tracking Debug"
+MESSAGE_SEC = 6.0      # 画面に出すお知らせ（キャリブレーションの結果など）の表示時間 [秒]
 
 
 class App:
@@ -76,18 +83,41 @@ class App:
         # ---- シミュレーションとデコーダ ----
         self.n = config.N_NEURONS
         self.noise = config.NOISE_STD
+        self.noise_type = config.NOISE_TYPE
+        self.primary = "PV"          # カーソル・アームを動かすデコーダ（C キーで切り替え）
+        self.compare = False         # 比較モード（V キー）：2 つのカーソルを同時に表示
+        self.arm_on = True           # ロボットアームの表示（A キー）
+        self.arm = TwoLinkArm()
+        self.calib = CalibrationTask()
+        self.metrics = {"PV": DecodingMetrics(), "LIN": DecodingMetrics()}
+        self.message, self.message_until = "", 0.0
         self.build_population()
-        self.metrics = DecodingMetrics()
         self.logger = SessionLogger(BASE_DIR)
         self.sim_time = 0.0
 
     def build_population(self):
-        """ニューロン集団とデコーダを（作り）直す"""
+        """
+        ニューロン集団とデコーダを（作り）直す。
+        ニューロンが入れかわるので、線形デコーダの学習結果は使えなくなる（もう一度 L でキャリブレーション）
+        """
         self.pop = NeuronPopulation(self.n, self.rng)
         self.pop.noise_std = self.noise
-        self.decoder = PopulationVectorDecoder(self.pop)
+        self.pop.noise_type = self.noise_type
+        self.rates = RateEstimator(self.n)
+        self.decoders = {"PV": PopulationVectorDecoder(self.pop), "LIN": LinearDecoder(self.n)}
+        self.dropout_since_calib = 0
+        if self.calib.active:
+            self.calib.cancel()
+        if self.primary == "LIN":
+            self.primary = "PV"
+        for m in self.metrics.values():
+            m.reset()
         self.renderer.set_population(self.pop, self.rng)
         print(f"[main] ニューロン {self.n} 個で再生成しました")
+
+    def notify(self, text):
+        print(f"[main] {text}")
+        self.message, self.message_until = text, time.monotonic() + MESSAGE_SEC
 
     # --------------------------------------------------------
     # キー操作
@@ -100,20 +130,44 @@ class App:
         elif key == glfw.KEY_UP:
             self.n = min(config.N_MAX, self.n + config.N_STEP)
             self.build_population()
-            self.metrics.reset()
         elif key == glfw.KEY_DOWN:
             self.n = max(config.N_MIN, self.n - config.N_STEP)
             self.build_population()
-            self.metrics.reset()
         elif key == glfw.KEY_N:
             self.noise = min(config.NOISE_MAX, self.noise + config.NOISE_STEP)
             self.pop.noise_std = self.noise
         elif key == glfw.KEY_M:
             self.noise = max(0.0, self.noise - config.NOISE_STEP)
             self.pop.noise_std = self.noise
+        elif key in (glfw.KEY_1, glfw.KEY_2, glfw.KEY_3) and action == glfw.PRESS:
+            self.noise_type = NOISE_TYPES[key - glfw.KEY_1]
+            self.pop.noise_type = self.noise_type
+            self.notify(f"noise type: {self.noise_type}")
         elif key == glfw.KEY_K and action == glfw.PRESS:
             k = self.pop.dropout()
-            print(f"[main] {k} 個のニューロンが脱落しました（残り {self.pop.n_alive} / {self.pop.n}）")
+            if self.decoders["LIN"].ready:
+                self.dropout_since_calib += k
+            self.notify(f"dropout: {k} neurons lost ({self.pop.n_alive} / {self.pop.n} alive)")
+        elif key == glfw.KEY_L and action == glfw.PRESS:
+            if self.calib.active:
+                self.calib.cancel()
+                self.notify("calibration cancelled")
+            else:
+                self.calib.start()
+                self.message = ""
+                print("[main] キャリブレーション開始：マゼンタのターゲットを手で追いかけてください")
+        elif key == glfw.KEY_C and action == glfw.PRESS:
+            if self.primary == "PV":
+                if self.decoders["LIN"].ready:
+                    self.primary = "LIN"
+                else:
+                    self.notify("LIN is not calibrated yet - press L first")
+            else:
+                self.primary = "PV"
+        elif key == glfw.KEY_V and action == glfw.PRESS:
+            self.compare = not self.compare
+        elif key == glfw.KEY_A and action == glfw.PRESS:
+            self.arm_on = not self.arm_on
         elif key == glfw.KEY_T and action == glfw.PRESS:
             if self.tracker is None:
                 print("[main] カメラがないのでテストモードのままです")
@@ -123,9 +177,8 @@ class App:
         elif key == glfw.KEY_D and action == glfw.PRESS:
             self.toggle_debug()
         elif key == glfw.KEY_R and action == glfw.PRESS:
-            # ニューロンを作り直し（脱落も元に戻る）、カーソル・評価・表示をリセット
+            # ニューロンを作り直し（脱落も元に戻る。線形デコーダの学習結果も消える）、カーソル・評価・表示をリセット
             self.build_population()
-            self.metrics.reset()
             self.renderer.reset_display()
 
     def toggle_debug(self):
@@ -159,12 +212,48 @@ class App:
     def sim_step(self, hand):
         true_v = hand.vel
         counts = self.pop.step(true_v)             # 運動 → ニューロンの発火
-        v_hat = self.decoder.step(counts)          # 発火 → 速度の推定（本当の速度は使わない）
-        self.metrics.add(true_v, v_hat)            # 評価のためだけに本当の速度と比べる
-        self.renderer.on_spikes(counts, self.pop.alive, self.decoder.rate_hat)
+        rate_hat = self.rates.step(counts)         # スパイク数 → 発火率の推定（100 ms の窓）
+        lin = self.decoders["LIN"]
+        for name, dec in self.decoders.items():    # 発火 → 速度の推定（本当の速度は使わない）
+            dec.step(rate_hat)
+            if name == "PV" or lin.ready:
+                self.metrics[name].add(true_v, dec.v_hat)   # 評価のためだけに本当の速度と比べる
+
+        # キャリブレーション中は (発火率, 本当の速度) を記録し、終わったら線形デコーダを学習する
+        if self.calib.step(rate_hat, true_v, hand.detected):
+            self.finish_calibration()
+
+        self.renderer.on_spikes(counts, self.pop.alive, rate_hat)
         self.sim_time += config.DT
-        self.logger.record(self.sim_time, "test" if self.test_mode else "camera", hand, true_v, v_hat,
-                           self.decoder.cursor, self.pop.n, self.pop.n_alive, self.noise, counts.sum())
+        prim = self.decoders[self.primary]
+        self.logger.record(self.sim_time, "test" if self.test_mode else "camera", hand, true_v,
+                           prim.v_hat, prim.cursor, self.pop.n, self.pop.n_alive, self.noise, counts.sum(),
+                           primary=self.primary, noise_type=self.noise_type, calibrating=self.calib.active,
+                           pv=self.decoders["PV"], lin=lin)
+
+    def finish_calibration(self):
+        if self.calib.valid_sec < config.CALIB_MIN_SEC:
+            self.notify(f"calibration failed: hand detected only {self.calib.valid_sec:.1f} s")
+            return
+        X, Y = self.calib.data()
+        info = self.decoders["LIN"].fit(X, Y, n_alive=self.pop.n_alive)
+        self.dropout_since_calib = 0
+        self.metrics["LIN"].reset()
+        self.primary = "LIN"
+        self.compare = True        # 学習直後は比較モードにして、PV と並べて見せる
+        self.notify(f"LIN calibrated: {info['samples']} samples, train R2 = {info['r2']:.2f}")
+
+    def lin_status(self):
+        """HUD に出す線形デコーダの状態（文字と色）"""
+        lin = self.decoders["LIN"]
+        if self.calib.active:
+            return "LIN: calibrating...", (255, 120, 220)
+        if not lin.ready:
+            return "LIN: not calibrated (press L)", (150, 160, 185)
+        if self.dropout_since_calib > 0:
+            return (f"LIN: stale ({self.dropout_since_calib} lost since calib, L = recal)", (255, 160, 110))
+        return f"LIN: calibrated with {lin.fit_info['n_alive']} neurons (R2 {lin.fit_info['r2']:.2f})", \
+            (150, 220, 255)
 
     def update_debug_window(self):
         if not self.debug_on or self.tracker is None:
@@ -208,7 +297,8 @@ class App:
                     acc = 0.0      # 大きく遅れたときは追いつくのをあきらめる
 
                 if now - last_metric > 0.2:
-                    self.metrics.compute()
+                    for m in self.metrics.values():
+                        m.compute()
                     last_metric = now
 
                 if self.test_mode:
@@ -217,11 +307,31 @@ class App:
                 else:
                     mode, mode_color = "CAMERA MODE (hand tracking)", (140, 230, 160)
 
+                # 表示するカーソル：ふだんは使っているデコーダだけ、比較モードでは両方（学習済みなら）
+                shown = [self.primary]
+                if self.compare:
+                    shown = ["PV"] + (["LIN"] if self.decoders["LIN"].ready else [])
+                decoders = [(name, self.decoders[name].cursor, self.decoders[name].v_hat) for name in shown]
+
+                # ロボットアーム：使っているデコーダのカーソルを手先の目標にして逆運動学で角度を求める
+                arm_target = self.decoders[self.primary].cursor
+                arm_pose = self.arm.solve(arm_target) if self.arm_on else None
+
+                calib = None
+                if self.calib.active:
+                    calib = {"target": self.calib.target, "progress": self.calib.progress,
+                             "remaining": self.calib.remaining, "recording": self.calib.recording,
+                             "valid_sec": self.calib.valid_sec}
+                lin_text, lin_color = self.lin_status()
+
                 self.renderer.render({
-                    "hand": hand, "true_v": hand.vel, "v_hat": self.decoder.v_hat,
-                    "cursor": self.decoder.cursor, "alive": self.pop.alive,
-                    "n": self.pop.n, "n_alive": self.pop.n_alive, "noise": self.noise,
-                    "corr": self.metrics.corr, "rmse": self.metrics.rmse,
+                    "hand": hand, "true_v": hand.vel, "decoders": decoders, "primary": self.primary,
+                    "alive": self.pop.alive, "n": self.pop.n, "n_alive": self.pop.n_alive,
+                    "noise": self.noise, "noise_type": self.noise_type,
+                    "metrics": {k: (m.corr, m.rmse) for k, m in self.metrics.items()},
+                    "lin_status": lin_text, "lin_status_color": lin_color,
+                    "arm": arm_pose, "arm_target": arm_target, "calib": calib,
+                    "message": self.message if now < self.message_until else "",
                     "mode": mode, "mode_color": mode_color, "fps": fps,
                 }, dt)
                 self.update_debug_window()

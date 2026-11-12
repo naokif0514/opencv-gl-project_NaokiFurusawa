@@ -6,7 +6,8 @@ PyOpenGL + glfw による描画（シェーダー使用）。1 つのウィン�
   ┌──────────────────────┬──────────────────────┐
   │ 左：運動野のニューロン（3D）│ 右：本当の手 と デコードしたカーソル │
   │   曲面（皮質）上に格子状に並んだ球 │   （2D 平面、ズレがわかるように線で結ぶ） │
-  │   色 = 好きな方向、光 = スパイク  │   左側に速度の比較と色の凡例        │
+  │   色 = 好きな方向、光 = スパイク  │   カーソルを手先の目標とするロボットアーム（3D）│
+  │                          │   左側に速度の比較と色の凡例        │
   ├──────────────────────┴──────────────────────┤
   │ 下：スパイクのラスタープロット（横軸：時間、縦軸：ニューロン番号）            │
   └─────────────────────────────────────────────┘
@@ -15,6 +16,8 @@ PyOpenGL + glfw による描画（シェーダー使用）。1 つのウィン�
 ・ラスタープロットは「ニューロン数 × 時間ビン数」の画像を毎ステップ 1 列ずつ左へずらし、
   テクスチャとして貼る（スパイクの数が多くても描画の重さが変わらない）
 ・文字（HUD・ラベル）は OpenCV の cv2.putText で透明な画像に描き、テクスチャとして重ねる
+・ロボットアームは、関節を球・リンクを円柱として 3D で描く。右の平面を真上から正射影で見るので、
+  アームの手先の位置と 2D のカーソルの位置がぴったり重なる（陰影で立体感を出している）
 """
 
 import ctypes
@@ -47,6 +50,44 @@ PANEL_Y = 44
 COMPASS = (LEFT_W + 60, PANEL_Y + 95, 44)             # 速度比較の円 (中心 x, 中心 y, 半径)
 WHEEL = (LEFT_W + 60, PANEL_Y + 290, 38)              # 色の凡例の円
 RASTER = (70, TOP_H + 26, W - 90, H - TOP_H - 52)     # ラスタープロット (x, y, 幅, 高さ)
+ARM_MARGIN = 0.08                                     # アームの描画範囲を平面より少し広げる（肩の土台が見えるように）
+
+# デコーダごとのカーソルの色（RGB 0〜1）
+DECODER_COLORS = {"PV": (1.0, 0.85, 0.2), "LIN": (0.3, 0.85, 1.0)}
+TARGET_COLOR = (1.0, 0.3, 0.85)
+
+
+def _rgb255(c):
+    """RGB 0〜1 → 文字の色 0〜255（overlay 画像は RGBA の順でテクスチャに送るので RGB のまま）"""
+    return tuple(int(v * 255) for v in c)
+
+
+def ortho(left, right, bottom, top, near, far):
+    m = np.identity(4, dtype=np.float32)
+    m[0, 0] = 2.0 / (right - left)
+    m[1, 1] = 2.0 / (top - bottom)
+    m[2, 2] = -2.0 / (far - near)
+    m[0, 3] = -(right + left) / (right - left)
+    m[1, 3] = -(top + bottom) / (top - bottom)
+    m[2, 3] = -(far + near) / (far - near)
+    return m
+
+
+def translate(x, y, z=0.0):
+    m = np.identity(4, dtype=np.float32)
+    m[:3, 3] = (x, y, z)
+    return m
+
+
+def rotate_z(a):
+    m = np.identity(4, dtype=np.float32)
+    c, s = math.cos(a), math.sin(a)
+    m[0, 0], m[0, 1], m[1, 0], m[1, 1] = c, -s, s, c
+    return m
+
+
+def scale(x, y, z):
+    return np.diag([x, y, z, 1.0]).astype(np.float32)
 
 
 def surface_height(x, z):
@@ -295,7 +336,7 @@ class CortexView:
         # カメラはゆっくり左右に揺れる
         a = math.radians(18.0 * math.sin(t * 0.25))
         cam = (3.3 * math.sin(a), 2.3, 3.3 * math.cos(a))
-        view = look_at(cam, (0.0, 0.05, 0.1), (0.0, 1.0, 0.0))
+        view = look_at(cam, (0.0, 0.18, 0.1), (0.0, 1.0, 0.0))
         proj = perspective(38.0, viewport[2] / viewport[3], 0.1, 20.0)
         light = (0.3, 1.0, 0.5)
 
@@ -318,6 +359,95 @@ class CortexView:
         self.neuron_shader.set_float("uRadius", self.radius)
         gl.glBindVertexArray(self.vao)
         gl.glDrawElementsInstanced(gl.GL_TRIANGLES, self.sphere_count, gl.GL_UNSIGNED_INT, None, self.n)
+        gl.glBindVertexArray(0)
+        gl.glDisable(gl.GL_DEPTH_TEST)
+
+
+# ============================================================
+# 右：ロボットアーム（3D、真上からの正射影）
+# ============================================================
+class ArmView:
+    """関節 = 球、リンク = 円柱。部品ごとに変換行列を変えて同じメッシュを描く（1 フレーム 10 回ほどの描画命令）"""
+
+    LINK_COLOR = (0.62, 0.68, 0.78)
+    JOINT_COLOR = (0.95, 0.55, 0.18)
+    BASE_COLOR = (0.32, 0.36, 0.44)
+
+    def __init__(self):
+        self.shader = ShaderProgram("arm.vert", "arm.frag")
+        # 円柱：x 軸方向に 0〜1、半径 1（側面のみ。両端は関節の球で隠れる）
+        seg = config.ARM_MESH_SEGMENTS
+        a = np.linspace(0, 2 * np.pi, seg + 1)
+        verts = []
+        for x in (0.0, 1.0):
+            for ang in a:
+                c, sn = math.cos(ang), math.sin(ang)
+                verts.append((x, c, sn, 0.0, c, sn))        # 位置 (x, cos, sin)、法線 (0, cos, sin)
+        verts = np.array(verts, dtype=np.float32)
+        idx = []
+        for i in range(seg):
+            j = i + seg + 1
+            idx += [i, i + 1, j, i + 1, j + 1, j]
+        self.cyl = self._make_mesh(verts, np.array(idx, dtype=np.uint32))
+        # 球：アイコスフィア（法線 = 位置）
+        sv, si = icosphere(2)
+        self.sph = self._make_mesh(np.hstack([sv, sv]).astype(np.float32), si)
+
+    @staticmethod
+    def _make_mesh(verts, idx):
+        vao = gl.glGenVertexArrays(1)
+        gl.glBindVertexArray(vao)
+        vbo = gl.glGenBuffers(1)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, vbo)
+        gl.glBufferData(gl.GL_ARRAY_BUFFER, verts.nbytes, verts, gl.GL_STATIC_DRAW)
+        gl.glEnableVertexAttribArray(0)
+        gl.glVertexAttribPointer(0, 3, gl.GL_FLOAT, gl.GL_FALSE, 24, ctypes.c_void_p(0))
+        gl.glEnableVertexAttribArray(1)
+        gl.glVertexAttribPointer(1, 3, gl.GL_FLOAT, gl.GL_FALSE, 24, ctypes.c_void_p(12))
+        ebo = gl.glGenBuffers(1)
+        gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, ebo)
+        gl.glBufferData(gl.GL_ELEMENT_ARRAY_BUFFER, idx.nbytes, idx, gl.GL_STATIC_DRAW)
+        gl.glBindVertexArray(0)
+        return vao, len(idx)
+
+    def _draw(self, mesh, model, rot, color):
+        self.shader.set_mat4("uModel", model)
+        self.shader.set_mat4("uRot", rot)
+        self.shader.set_vec3("uColor", color)
+        gl.glBindVertexArray(mesh[0])
+        gl.glDrawElements(gl.GL_TRIANGLES, mesh[1], gl.GL_UNSIGNED_INT, None)
+
+    def _link(self, p0, p1, r, color):
+        d = np.asarray(p1) - np.asarray(p0)
+        length = float(np.hypot(*d))
+        rot = rotate_z(math.atan2(d[1], d[0]))
+        self._draw(self.cyl, translate(p0[0], p0[1]) @ rot @ scale(length, r, r), rot, color)
+
+    def _joint(self, p, r, color):
+        self._draw(self.sph, translate(p[0], p[1]) @ scale(r, r, r), np.identity(4, dtype=np.float32), color)
+
+    def draw(self, pose, viewport):
+        gl.glViewport(*viewport)
+        gl.glEnable(gl.GL_DEPTH_TEST)
+        gl.glClear(gl.GL_DEPTH_BUFFER_BIT)
+        m = ARM_MARGIN
+        self.shader.use()
+        self.shader.set_mat4("uProj", ortho(-m, 1 + m, -m, 1 + m, -1.0, 1.0))
+        self.shader.set_float("uAlpha", 1.0)
+
+        b, e, h = pose.base, pose.elbow, pose.hand
+        self._joint(b, 0.055, self.BASE_COLOR)                 # 肩（土台）
+        self._link(b, e, 0.030, self.LINK_COLOR)               # 上腕
+        self._link(e, h, 0.024, self.LINK_COLOR)               # 前腕
+        self._joint(b, 0.042, self.JOINT_COLOR)
+        self._joint(e, 0.036, self.JOINT_COLOR)                # 肘
+        self._joint(h, 0.024, self.JOINT_COLOR)                # 手首
+        # 手先のグリッパー（前腕の向きから ±30° に開いた 2 本の指）
+        fa = pose.theta1 + pose.theta2
+        for s in (1, -1):
+            a = fa + s * math.radians(30)
+            tip = h + 0.055 * np.array([math.cos(a), math.sin(a)])
+            self._link(h, tip, 0.010, self.LINK_COLOR)
         gl.glBindVertexArray(0)
         gl.glDisable(gl.GL_DEPTH_TEST)
 
@@ -346,6 +476,7 @@ class Renderer:
         print(f"[renderer] {gl.glGetString(gl.GL_VERSION).decode()} / {gl.glGetString(gl.GL_RENDERER).decode()}")
 
         self.cortex = CortexView()
+        self.arm = ArmView()
         self.batch = Batch2D()
         self.overlay = TexturedQuad(gl.GL_LINEAR)
         self.raster_quad = TexturedQuad(gl.GL_NEAREST)
@@ -354,7 +485,7 @@ class Renderer:
         self.start = time.monotonic()
 
         self.true_trail = deque(maxlen=45)
-        self.cursor_trail = deque(maxlen=45)
+        self.cursor_trails = {name: deque(maxlen=45) for name in DECODER_COLORS}
 
     # --------------------------------------------------------
     # ニューロン集団が変わったとき・スパイクが出たとき
@@ -377,7 +508,8 @@ class Renderer:
         self.activity[:] = 0
         self.raster[:] = self.raster_bg
         self.true_trail.clear()
-        self.cursor_trail.clear()
+        for tr in self.cursor_trails.values():
+            tr.clear()
 
     def on_spikes(self, counts, alive, rate_hat):
         """
@@ -421,17 +553,29 @@ class Renderer:
         self.cortex.draw(self.flash, self.activity, s["alive"], t,
                          (0, int((H - TOP_H) * sy), int(LEFT_W * sx), int(TOP_H * sy)))
 
-        # ---- 2D の図形 ----
+        # ---- 2D の図形（背景側）----
         gl.glViewport(0, 0, fb_w, fb_h)
         gl.glEnable(gl.GL_BLEND)
         gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
-        self._draw_panel(s)
+        self._draw_panel_background(s)
         self._draw_compass(s)
         self._draw_wheel()
         b = self.batch
         rx, ry, rw, rh = RASTER
         b.rect(rx - 2, ry - 2, rw + 4, rh + 4, (0.25, 0.3, 0.4, 1.0))
         b.line(LEFT_W, 8, LEFT_W, TOP_H - 8, 1, (0.25, 0.3, 0.4, 1.0))
+        b.flush()
+
+        # ---- ロボットアーム（3D）。平面の座標 -m〜1+m がこのビューポートにぴったり対応する ----
+        if s["arm"] is not None:
+            m = ARM_MARGIN
+            x0, y0 = PANEL_X - m * PANEL, PANEL_Y + (1 + m) * PANEL     # 左下（ウィンドウ座標）
+            size = (1 + 2 * m) * PANEL
+            self.arm.draw(s["arm"], (int(x0 * sx), int((H - y0) * sy), int(size * sx), int(size * sy)))
+            gl.glViewport(0, 0, fb_w, fb_h)
+
+        # ---- 2D の図形（手・カーソル・ターゲット。アームの上に重ねる）----
+        self._draw_panel_markers(s)
         b.flush()
 
         # ---- ラスタープロット ----
@@ -452,8 +596,8 @@ class Renderer:
         """手の座標（0〜1, y 上向き）→ 右の 2D 平面の画素座標"""
         return PANEL_X + p[0] * PANEL, PANEL_Y + (1.0 - p[1]) * PANEL
 
-    def _draw_panel(self, s):
-        """右：本当の手（半透明のリング）とデコードしたカーソル（はっきりした点）"""
+    def _draw_panel_background(self, s):
+        """右の平面の背景・格子・（アームありなら）届く範囲・軌跡"""
         b = self.batch
         b.rect(PANEL_X, PANEL_Y, PANEL, PANEL, (0.06, 0.07, 0.11, 1.0))
         for k in range(1, 4):
@@ -461,28 +605,78 @@ class Renderer:
             b.line(PANEL_X + g, PANEL_Y, PANEL_X + g, PANEL_Y + PANEL, 1, (0.14, 0.16, 0.22, 1.0))
             b.line(PANEL_X, PANEL_Y + g, PANEL_X + PANEL, PANEL_Y + g, 1, (0.14, 0.16, 0.22, 1.0))
 
+        arm = s["arm"]
+        if arm is not None:
+            # アームの届く範囲（肩から L1+L2 の半円）を薄く表示
+            bx, by = self._to_panel(arm.base)
+            r = (config.ARM_L1 + config.ARM_L2) * PANEL
+            for k in range(60):
+                a0, a1 = math.pi * k / 60, math.pi * (k + 1) / 60
+                p0 = (bx + r * math.cos(a0), by - r * math.sin(a0))
+                p1 = (bx + r * math.cos(a1), by - r * math.sin(a1))
+                if PANEL_Y <= min(p0[1], p1[1]) and PANEL_X <= min(p0[0], p1[0]) and max(p0[0], p1[0]) <= PANEL_X + PANEL:
+                    b.line(*p0, *p1, 1.5, (0.35, 0.45, 0.6, 0.6))
+            b.rect(bx - 40, by - 2, 80, 10, (0.18, 0.2, 0.26, 1.0))       # 土台の台座
+
         hand = s["hand"]
-        cur = self._to_panel(s["cursor"])
-        self.cursor_trail.append(cur)
         if hand.pos is not None:
             self.true_trail.append(self._to_panel(hand.pos))
         else:
             self.true_trail.clear()
+        shown = {name for name, _, _ in s["decoders"]}
+        for name, cursor, _ in s["decoders"]:
+            self.cursor_trails[name].append(self._to_panel(cursor))
+        for name, tr in self.cursor_trails.items():
+            if name not in shown:
+                tr.clear()
 
         # 軌跡（古いほど薄く）
-        for trail, color in ((self.true_trail, (1.0, 1.0, 1.0)), (self.cursor_trail, (1.0, 0.85, 0.2))):
+        trails = [(self.true_trail, (1.0, 1.0, 1.0))] + [(self.cursor_trails[n], DECODER_COLORS[n])
+                                                        for n, _, _ in s["decoders"]]
+        for trail, color in trails:
             m = len(trail)
             for i, (x, y) in enumerate(trail):
                 b.circle(x, y, 2.0, (*color, 0.35 * (i + 1) / m), 8)
 
+    def _draw_panel_markers(self, s):
+        """本当の手（半透明のリング）、デコードしたカーソル（はっきりした点）、キャリブレーションのターゲット"""
+        b = self.batch
+        hand = s["hand"]
+        calib = s["calib"]
+
+        if calib is not None:
+            # ターゲット（マゼンタの円）と進み具合のバー
+            tx, ty = self._to_panel(calib["target"])
+            b.circle(tx, ty, 26, (*TARGET_COLOR, 0.18))
+            b.ring(tx, ty, 26, 3, (*TARGET_COLOR, 0.95))
+            b.circle(tx, ty, 4, (*TARGET_COLOR, 1.0))
+            b.rect(PANEL_X, PANEL_Y + PANEL - 6, PANEL, 6, (0.15, 0.1, 0.18, 1.0))
+            b.rect(PANEL_X, PANEL_Y + PANEL - 6, PANEL * calib["progress"], 6, (*TARGET_COLOR, 1.0))
+
+        arm = s["arm"]
+        if arm is not None and not arm.reachable:
+            # 届かないとき：手先から目標までを点線で結ぶ
+            hx, hy = self._to_panel(arm.hand)
+            px, py = self._to_panel(s["arm_target"])
+            for k in range(0, 10, 2):
+                b.line(hx + (px - hx) * k / 10, hy + (py - hy) * k / 10,
+                       hx + (px - hx) * (k + 1) / 10, hy + (py - hy) * (k + 1) / 10, 1.5, (1.0, 0.5, 0.5, 0.8))
+
+        for name, cursor, _ in s["decoders"]:
+            cur = self._to_panel(cursor)
+            if hand.pos is not None:
+                hp = self._to_panel(hand.pos)
+                b.line(hp[0], hp[1], cur[0], cur[1], 1.5, (*DECODER_COLORS[name], 0.45))   # ズレ
         if hand.pos is not None:
             hp = self._to_panel(hand.pos)
-            b.line(hp[0], hp[1], cur[0], cur[1], 1.5, (1.0, 0.4, 0.4, 0.6))   # ズレ
             b.circle(hp[0], hp[1], 20, (1.0, 1.0, 1.0, 0.12))
             b.ring(hp[0], hp[1], 20, 3, (1.0, 1.0, 1.0, 0.55))
-        b.circle(cur[0], cur[1], 9, (1.0, 0.85, 0.2, 1.0))
-        b.line(cur[0] - 16, cur[1], cur[0] + 16, cur[1], 1.5, (1.0, 0.85, 0.2, 0.9))
-        b.line(cur[0], cur[1] - 16, cur[0], cur[1] + 16, 1.5, (1.0, 0.85, 0.2, 0.9))
+        for name, cursor, _ in s["decoders"]:
+            cx, cy = self._to_panel(cursor)
+            c = DECODER_COLORS[name]
+            b.circle(cx, cy, 8, (*c, 1.0))
+            b.line(cx - 15, cy, cx + 15, cy, 1.5, (*c, 0.9))
+            b.line(cx, cy - 15, cx, cy + 15, 1.5, (*c, 0.9))
 
     def _draw_compass(self, s):
         """速度の比較：本当の速度（白）とデコードした速度（黄）を同じ円の中に矢印で表示"""
@@ -491,8 +685,10 @@ class Renderer:
         b.circle(cx, cy, r, (0.06, 0.07, 0.11, 1.0))
         b.ring(cx, cy, r, 1.5, (0.3, 0.35, 0.45, 1.0))
         scale = r / 1.2      # 半径 = 速さ 1.2 [画面/秒]
-        # 本当の速度は太い半透明の白、推定速度は細い黄色で上に重ねる（重なっていればデコードが正確）
-        for v, color, w in ((s["true_v"], (1.0, 1.0, 1.0, 0.45), 7), (s["v_hat"], (1.0, 0.85, 0.2, 1.0), 2.5)):
+        # 本当の速度は太い半透明の白、推定速度は細い線（デコーダの色）で上に重ねる（重なっていればデコードが正確）
+        arrows = [(s["true_v"], (1.0, 1.0, 1.0, 0.45), 7)]
+        arrows += [(v, (*DECODER_COLORS[name], 1.0), 2.5) for name, _, v in s["decoders"]]
+        for v, color, w in arrows:
             vx, vy = np.clip(v, -1.2, 1.2)
             b.arrow(cx, cy, cx + vx * scale, cy - vy * scale, w, color)
 
@@ -524,32 +720,68 @@ class Renderer:
         T = self._text
         dim = (150, 160, 185)
 
-        # ---- HUD（左上）----
-        cv2.rectangle(img, (10, 10), (310, 186), (8, 10, 20, 200), -1)
-        cv2.rectangle(img, (10, 10), (310, 186), (70, 90, 130, 255), 1)
-        T(img, "PSEUDO BCI DECODER", 20, 32, 0.55, (255, 255, 255))
-        T(img, s["mode"], 20, 54, 0.45, s["mode_color"])
+        # ---- HUD（左上。皮質の 3D 表示をなるべく隠さないよう、横長 2 列にする）----
+        compare = len(s["decoders"]) > 1
+        x0, x1, box_w, box_h = 20, 335, 610, 150
+        cv2.rectangle(img, (10, 10), (10 + box_w, box_h), (8, 10, 20, 200), -1)
+        cv2.rectangle(img, (10, 10), (10 + box_w, box_h), (70, 90, 130, 255), 1)
+        # 左の列：入力とニューロン
+        T(img, "PSEUDO BCI DECODER", x0, 32, 0.55, (255, 255, 255))
+        T(img, s["mode"], x0, 54, 0.42, s["mode_color"])
         hand = s["hand"]
-        T(img, "hand: detected" if hand.detected else "hand: NOT FOUND (v = 0)", 20, 76, 0.45,
+        T(img, "hand: detected" if hand.detected else "hand: NOT FOUND (v = 0)", x0, 76, 0.45,
           (140, 230, 160) if hand.detected else (255, 120, 120))
-        T(img, f"neurons: {s['n_alive']} / {s['n']}", 20, 98)
-        T(img, f"noise: {s['noise']:.1f} Hz", 175, 98)
-        corr, rmse = s["corr"], s["rmse"]
-        T(img, "corr: " + ("--" if corr is None else f"{corr:.2f}"), 20, 124, 0.6, (255, 230, 120))
-        T(img, "RMSE: " + ("--" if rmse is None else f"{rmse:.2f}"), 175, 124, 0.6, (255, 230, 120))
-        T(img, f"(last {config.METRIC_WINDOW:.0f} s, velocity [screen/s])", 20, 144, 0.38, dim)
-        T(img, f"render {s['fps']:4.1f} fps   camera {hand.fps:4.1f} fps", 20, 172, 0.4, dim)
+        T(img, f"neurons: {s['n_alive']} / {s['n']}", x0, 98)
+        T(img, f"noise: {s['noise_type']}  {s['noise']:.0f} Hz", x0, 120)
+        T(img, f"render {s['fps']:4.1f} fps   camera {hand.fps:4.1f} fps", x0, 140, 0.38, dim)
+
+        # 右の列：デコーダと精度（比較モードでは 2 つのデコーダを並べる）
+        prim = s["primary"]
+        T(img, "decoder: " + ("PV (pop. vector)" if prim == "PV" else "LIN (ridge)")
+          + ("  +compare" if compare else ""), x1, 32, 0.45, _rgb255(DECODER_COLORS[prim]))
+        T(img, s["lin_status"], x1, 52, 0.38, s["lin_status_color"])
+        y = 74
+        T(img, "corr", x1 + 70, y, 0.4, dim)
+        T(img, "RMSE", x1 + 150, y, 0.4, dim)
+        T(img, f"last {config.METRIC_WINDOW:.0f} s", x1 + 225, y, 0.38, dim)
+        names = ["PV", "LIN"] if compare else [prim]
+        for name in names:
+            y += 26
+            corr, rmse = s["metrics"][name]
+            c = _rgb255(DECODER_COLORS[name])
+            T(img, name, x1 + 4, y, 0.6, c)
+            T(img, "--" if corr is None else f"{corr:.2f}", x1 + 70, y, 0.65, c, 2)
+            T(img, "--" if rmse is None else f"{rmse:.2f}", x1 + 150, y, 0.65, c, 2)
+        T(img, "velocity in [screen/s]", x1, 140, 0.38, dim)
 
         T(img, "Motor cortex neurons   color = preferred direction / flash = spike", 14, TOP_H - 12, 0.42, dim)
 
         # ---- 右の平面 ----
-        T(img, "Hand (white ring) vs Decoded cursor (yellow)", PANEL_X, PANEL_Y - 14, 0.48)
+        x = PANEL_X
+        T(img, "Hand (white)", x, PANEL_Y - 14, 0.48)
+        x += 112
+        for name, _, _ in s["decoders"]:
+            label = "PV cursor" if name == "PV" else "LIN cursor"
+            T(img, label, x, PANEL_Y - 14, 0.48, _rgb255(DECODER_COLORS[name]))
+            x += 100
+        if s["arm"] is not None:
+            T(img, f"arm -> {prim}", x, PANEL_Y - 14, 0.48, (200, 205, 220))
+            if not s["arm"].reachable:
+                T(img, "out of reach", PANEL_X + PANEL - 108, PANEL_Y + PANEL - 14, 0.45, (255, 140, 140))
+        calib = s["calib"]
+        if calib is not None:
+            if calib["recording"]:
+                msg = f"CALIBRATION: follow the target  {calib['remaining']:4.1f} s"
+            else:
+                msg = f"CALIBRATION: put your hand on the target  {calib['remaining']:4.1f} s"
+            T(img, msg, PANEL_X + 10, PANEL_Y + 24, 0.5, _rgb255(TARGET_COLOR), 1)
+            T(img, f"recorded {calib['valid_sec']:4.1f} s (hand detected)", PANEL_X + 10, PANEL_Y + 44, 0.42, dim)
+        if s["message"]:
+            T(img, s["message"], PANEL_X + 10, PANEL_Y + PANEL - 34, 0.45, (255, 255, 255))
+
         T(img, "velocity", COMPASS[0] - 30, COMPASS[1] - COMPASS[2] - 10, 0.42, dim)
-        T(img, "true", COMPASS[0] - 40, COMPASS[1] + COMPASS[2] + 18, 0.4, (255, 255, 255))
-        T(img, "decoded", COMPASS[0] - 8, COMPASS[1] + COMPASS[2] + 18, 0.4, (255, 215, 60))
+        T(img, "white = true", COMPASS[0] - 44, COMPASS[1] + COMPASS[2] + 18, 0.38, (255, 255, 255))
         T(img, "PD color", WHEEL[0] - 32, WHEEL[1] - WHEEL[2] - 10, 0.42, dim)
-        T(img, "UP/DOWN neurons  N/M noise  K dropout  T test  D debug  R reset  ESC quit",
-          PANEL_X - 110, TOP_H - 12, 0.40, (120, 135, 160))
 
         # ---- ラスタープロット ----
         rx, ry, rw, rh = RASTER
@@ -559,6 +791,9 @@ class Renderer:
         T(img, "#0", 14, ry + rh, 0.4, dim)
         T(img, f"-{config.RASTER_SEC:.0f} s", rx, ry + rh + 18, 0.4, dim)
         T(img, "now", rx + rw - 28, ry + rh + 18, 0.4, dim)
+        T(img, "UP/DOWN neurons  N/M noise  1/2/3 noise type  K dropout  L calibrate  "
+               "C decoder  V compare  A arm  T test  D debug  R reset  ESC quit",
+          rx + 70, ry + rh + 18, 0.40, (130, 145, 170))
 
     def should_close(self):
         return glfw.window_should_close(self.window)

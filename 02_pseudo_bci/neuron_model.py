@@ -25,13 +25,30 @@ neuron_model.py
   で生成する。これは電極で記録したスパイク列を「ビンごとのスパイク数」として扱う
   実際の BCI の前処理（spike binning）に対応する。
 
-■ ノイズ：ベースライン発火のゆらぎ
-  実際のニューロンの発火には、運動とは関係のないゆらぎ（覚醒度・注意・他の脳活動の影響）がある。
-  ここでは各ニューロンのベースラインを、ゆっくり変動するランダムな値（オルンシュタイン＝
-  ウーレンベック過程）で揺らす。
-      b_i(t) = b0_i + σ × ξ_i(t)
-      ξ_i(t+Δt) = ξ_i(t) − ξ_i(t) Δt/τ + sqrt(2Δt/τ) × N(0, 1)       （ξ の標準偏差は 1）
-  σ（NOISE_STD）が大きいほど、デコードは難しくなる。
+■ ノイズ（1/2/3 キーで種類を切り替え、N/M キーで強さ σ [Hz] を変える）
+  実際のニューロンの発火には、運動とは関係のないゆらぎがある。ここでは 2 種類を用意する。
+
+  (1) drift：ベースライン発火のゆっくりしたゆらぎ（覚醒度・注意・他の脳活動の影響に相当）
+      各ニューロンのベースラインを、ゆっくり変動するランダムな値（オルンシュタイン＝
+      ウーレンベック過程、時定数 τ = 0.5 秒）で揺らす。
+          b_i(t) = b0_i + σ × ξ_i(t)
+          ξ_i(t+Δt) = ξ_i(t) − ξ_i(t) Δt/τ + sqrt(2Δt/τ) × N(0, 1)       （ξ の標準偏差は 1）
+      数百 ms〜数秒のあいだ同じ向きにずれ続けるので、速度の推定に「ゆっくりしたかたより」が乗り、
+      積分したカーソルが流されやすい。
+
+  (2) independent：ニューロンごとに独立で、ビン（20 ms）ごとに毎回新しく入るゆらぎ
+      （シナプス入力の細かい変動など、ニューロンどうし・時刻どうしで相関のない成分に相当）
+          rate_i(t) = b_i(t) + m_i (v · pd_i) + σ × η_i(t)，  η_i(t) ~ N(0, 1)（毎ビン独立）
+      ニューロンどうしで独立なので、デコーダが N 個の票を足し合わせると打ち消し合い、
+      推定誤差の標準偏差はおよそ 1/√N で小さくなる（集団符号化の「平均化の効果」）。
+      ニューロン数を増やすと精度がはっきり上がるのはこのノイズのとき。
+
+  (3) both：(1) と (2) の両方（同じ σ）
+
+  どちらも発火率に加えたあとで 0 未満を 0 に切り、そこからポアソン分布でスパイクを作る。
+  そのため、スパイクはいつも整数で、ラスタープロットの見た目も自然なままになる。
+  ただし σ が大きいと 0 で切られる時間が増え、変調（速度による発火率の変化）が小さく見えるという
+  かたよりも生じる。これは平均化では消えない誤差で、ゲインを学習する線形デコーダでは補正される。
 
 ■ ニューロンの脱落（dropout）
   慢性埋め込み電極では、時間がたつと組織の反応や電極の劣化で、拾えるニューロンが減っていく。
@@ -46,6 +63,8 @@ neuron_model.py
 import numpy as np
 
 import config
+
+NOISE_TYPES = ("drift", "independent", "both")
 
 
 class NeuronPopulation:
@@ -65,7 +84,8 @@ class NeuronPopulation:
         self.b0 = config.BASE_RATE * (1.0 + h * self.rng.uniform(-1, 1, n))
         self.m = config.MODULATION * (1.0 + h * self.rng.uniform(-1, 1, n))
 
-        self.noise_std = config.NOISE_STD
+        self.noise_std = config.NOISE_STD        # ノイズの強さ σ [Hz]
+        self.noise_type = config.NOISE_TYPE       # "drift" / "independent" / "both"
         self.xi = self.rng.normal(size=n)          # ベースラインのゆらぎ ξ_i
         self.alive = np.ones(n, dtype=bool)        # 脱落していないか
 
@@ -76,18 +96,21 @@ class NeuronPopulation:
     def firing_rate(self, v):
         """
         速度ベクトル v=(vx, vy) に対する各ニューロンの発火率（コサインチューニング）。
-            rate_i = b_i(t) + m_i × (v · pd_i)
+            rate_i = b0_i + m_i × (v · pd_i) + （ノイズ）
         v · pd_i = |v| cos(θ_v − θ_pd_i) なので、上の式と同じもの。
         """
-        baseline = self.b0 + self.noise_std * self.xi
-        rate = baseline + self.m * (self.pd @ np.asarray(v, dtype=np.float64))
+        rate = self.b0 + self.m * (self.pd @ np.asarray(v, dtype=np.float64))
+        if self.noise_type in ("drift", "both"):
+            rate = rate + self.noise_std * self.xi                            # ゆっくりしたゆらぎ
+        if self.noise_type in ("independent", "both"):
+            rate = rate + self.noise_std * self.rng.normal(size=self.n)       # 毎ビン独立なゆらぎ
         return np.maximum(rate, 0.0)               # 発火率は負にならない
 
     def step(self, v, dt=config.DT):
         """
         Δt だけ時間を進め、各ニューロンのスパイク数を返す。
-        1. ノイズ ξ を更新（オルンシュタイン＝ウーレンベック過程）
-        2. コサインチューニングで発火率を計算
+        1. ゆっくりしたノイズ ξ を更新（オルンシュタイン＝ウーレンベック過程）
+        2. コサインチューニングで発火率を計算（ノイズの種類に応じてゆらぎを加える）
         3. ポアソン分布からスパイク数を生成（脱落したニューロンは 0）
         """
         tau = config.NOISE_TAU
