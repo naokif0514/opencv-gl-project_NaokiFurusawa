@@ -2,27 +2,29 @@
 main.py
 -------
 BCI オペレーター（ゲーム本体）。実際の BCI 研究の「ハイブリッド BCI」をもとにしたゲーム。
-  ・視線 → 行き先やつかむ物を選ぶ（前頭眼野・視覚野）              … gaze.py
-  ・手の動き → 擬似ニューロンの発火 → デコード → アーム（運動野）    … cortex_sim.py（段階 3 でアームを操作）
-  ・背景はカメラ映像（AR）。現実の色の物がゲーム内のアイテムになる    … vision.py / items.py
-  ・横に本物の脳の 3D モデルを表示し、今使っている領域が光る          … brain_renderer.py
+  ・視線 → 行き先やつかむ物を選ぶ（前頭眼野・視覚野）                       … gaze.py
+  ・手の動き → 擬似ニューロンの発火 → デコード → ロボットアーム（運動野）       … cortex_sim.py / robot.py
+  ・手を握る/開く → 把持ニューロンの発火 → デコード → グリッパー（運動野・体性感覚野）
+  ・背景はカメラ映像（AR）。現実の色の物がゲーム内のアイテムになる             … vision.py / items.py
+  ・横に本物の脳の 3D モデルを表示し、今使っている領域が光る                   … brain_renderer.py
 
-【段階 2 の時点の流れ】
-  1. 脳と接続中：脳が pial から inflated へふくらむ（約 2 秒）
-  2. 視線同期：AR 画面の 5 点（四隅 + 中央）を順に見て、視線のキャリブレーションをする
-  3. 操作：アイテムやゴールを約 1 秒見つめると選ばれ、ロボットの台座がその近くへ移動する
+■ 画面（状態）の流れ
+  title（タイトル。脳は pial）
+   → connect（脳と接続中：pial → inflated へふくらむ）
+   → gaze_calib（視線同期：5 点。テストモードでは省略）
+   → stage_intro（ステージの説明）
+   → hand_calib（同期フェーズ：手のキャリブレーション。速度と把持のデコーダを学習）
+   → play（ミッション。mission.py）→ stage_clear（スコアとデコード精度の推移グラフ）
+   → 次のステージの stage_intro … → result（全ステージの結果）→ title
 
 使い方:
     cd 03_bci_game
     ../.venv/bin/python main.py            # カメラ（視線 + 手 + 色の物）
-    ../.venv/bin/python main.py --test     # カメラなし：マウスの位置 = 視線、マウスの動き = 手
-キー：G 注視点の表示、C 視線同期をやり直す、V 現実の色の物 ⇔ 仮想アイテム、
-      P 画面中央の枠に見せた物の色を登録、R ロボットを初期位置へ、
-      T テストモード、D デバッグ用カメラ窓、ESC 終了
+    ../.venv/bin/python main.py --test     # カメラなし：マウスの位置 = 視線、マウスの動き = 手、クリック = 握る
+    ../.venv/bin/python main.py --stage 3  # ステージ 3 から始める（確認用）
 """
 
 import argparse
-import math
 import os
 import sys
 import time
@@ -39,49 +41,30 @@ import numpy as np   # noqa: E402
 from OpenGL import GL as gl   # noqa: E402
 
 import config        # noqa: E402
-from brain_model import WARNING_TEXT, WARNING_TEXT_EN, BrainModel   # noqa: E402
-from brain_renderer import REGION_COLORS, BrainView                 # noqa: E402
+from brain_model import BrainModel                                  # noqa: E402
+from brain_renderer import BrainView                                # noqa: E402
 from cortex_sim import CortexSim                                    # noqa: E402
+from game_log import GameLogger                                     # noqa: E402
+from game_view import GameView                                      # noqa: E402
 from gaze import DwellSelector, GazeTracker                         # noqa: E402
-from gfx2d import Batch2D, TexturedQuad, rgb255                     # noqa: E402
+from hand_calib import HandCalibration                              # noqa: E402
 from hand_tracker import MouseHand                                  # noqa: E402
 from items import Goal, RealItemTracker, VirtualItems               # noqa: E402
-from jtext import JText                                             # noqa: E402
+from layout import AH, AW, AX, AY, H, W, calib_points, world_radius, world_to_screen   # noqa: E402
+from mission import STAGES, GripSwitch, Mission, gripper_tip        # noqa: E402
 from robot import Robot                                             # noqa: E402
-from robot_view import RobotView                                    # noqa: E402
 from vision import VisionThread                                     # noqa: E402
 
-W, H = config.WINDOW_WIDTH, config.WINDOW_HEIGHT
-AX, AY, AW, AH = config.AR_RECT
-BX, BY, BW, BH = config.BRAIN_RECT
-PANEL_X = BX
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEBUG_WINDOW = "Camera Debug"
 CONNECT_SEC = config.MORPH_SEC + 0.6
-
-
-def world_to_screen(p):
-    return np.array([AX + p[0] / config.WORLD_W * AW, AY + (1.0 - p[1] / config.WORLD_H) * AH])
-
-
-def screen_to_world(q):
-    return np.array([(q[0] - AX) / AW * config.WORLD_W, (1.0 - (q[1] - AY) / AH) * config.WORLD_H])
-
-
-def calib_points():
-    """視線同期の点：AR 画面の四隅（少し内側）と中央の 5 点。GAZE_CALIB_POINTS = 9 なら辺の中点も加える"""
-    m = config.GAZE_CALIB_INSET
-    xs, ys = (AX + AW * m, AX + AW * (1 - m)), (AY + AH * m, AY + AH * (1 - m))
-    cx, cy = AX + AW / 2, AY + AH / 2
-    pts = [(xs[0], ys[0]), (xs[1], ys[0]), (cx, cy), (xs[0], ys[1]), (xs[1], ys[1])]
-    if config.GAZE_CALIB_POINTS >= 9:
-        pts = [(xs[0], ys[0]), (cx, ys[0]), (xs[1], ys[0]), (xs[0], cy), (cx, cy), (xs[1], cy),
-               (xs[0], ys[1]), (cx, ys[1]), (xs[1], ys[1])]
-    return pts
+GOAL_POS = np.array([0.84, 0.15])
 
 
 class Game:
     def __init__(self, args):
         self.rng = np.random.default_rng()
+        self.first_stage = max(1, min(len(STAGES), args.stage)) - 1
 
         # ---- カメラ（見つからなければテストモード）----
         self.vision = None
@@ -101,21 +84,11 @@ class Game:
         self.model = BrainModel()
         self.brain = BrainView(self.model)
         self.brain.set_surface("pial", animate=False)
-        self.brain.camera.yaw, self.brain.camera.pitch, self.brain.camera.goal_dist = -100.0, 30.0, 3.7
-        self.brain.camera.sway = (-105.0, 25.0)      # ゲーム中は左半球の外側面を見ながら ±25° 揺れる
-        self.robot_view = RobotView()
-        self.batch = Batch2D()
-        self.ar_quad = TexturedQuad(gl.GL_LINEAR)
-        self.raster_quad = TexturedQuad(gl.GL_NEAREST)
-        self.overlay = TexturedQuad(gl.GL_LINEAR)
-        self.overlay_img = np.zeros((H, W, 4), dtype=np.uint8)
-        self._last_overlay = -1.0
-        self._ar_frame_id = -1
-        self.jtext = JText()
+        self.view = GameView(self)
+        self.logger = GameLogger(BASE_DIR)
 
-        self.cortex = CortexSim(config.N_NEURONS, self.rng)
-        self.brain.set_population(self.cortex.pop, self.rng)
         self.mouse_hand = MouseHand()
+        self.mouse_down = False
         self.gaze = GazeTracker(calib_points())
         self.dwell = DwellSelector()
         self.show_gaze = True
@@ -123,14 +96,22 @@ class Game:
         self.real_items = RealItemTracker()
         self.virtual = VirtualItems(self.rng)
         self.use_virtual = self.test_mode
-        self.goal = Goal(np.array([0.84, 0.16]), 0.06)
-        self.virtual.spawn(avoid=[config.ROBOT_START, self.goal.pos])
-        self.selected = None          # 選ばれた対象の id（"goal" またはアイテムの id）
+        self.extra_items = []         # スキャンしたデジタルの荷物・ゴールに置いた荷物
+        self.hand_calib = HandCalibration()
+        self.grip_switch = GripSwitch()
         self.message, self.message_until = "", 0.0
-
-        self.state = "connect"        # connect → gaze_calib → play
-        self.state_t = 0.0
-        self.brain.set_surface("infl")   # 脳と接続中：pial → inflated へふくらむ
+        self.banner, self.banner_until = "", 0.0
+        self.results = []
+        self.mission = None
+        self.stage_idx = self.first_stage
+        self.recalibrating = False
+        self.resume_play = False
+        self.selected = None
+        self.last_g = 0.0
+        self.hand = None
+        self.events = []              # このフレームで起きたこと（ログ用）
+        self.build_cortex(STAGES[self.stage_idx])
+        self.set_state("title")
 
     def _init_window(self):
         if not glfw.init():
@@ -150,80 +131,143 @@ class Game:
             gl.glEnable(gl.GL_MULTISAMPLE)
         print(f"[main] {gl.glGetString(gl.GL_RENDERER).decode()}")
         glfw.set_key_callback(self.window, self.on_key)
+        glfw.set_mouse_button_callback(self.window, self.on_mouse_button)
 
     # --------------------------------------------------------
-    # 状態
+    # ステージ・状態
     # --------------------------------------------------------
+    @property
+    def stage(self):
+        return STAGES[self.stage_idx]
+
+    def build_cortex(self, st):
+        """ステージのニューロン数・ノイズで運動野を作り直す（デコーダは未学習に戻る）"""
+        self.cortex = CortexSim(st.n_neurons, self.rng, st.noise, st.noise_type)
+        self.brain.set_neurons(self.cortex.n_all, self.cortex.colors, self.rng)
+
     def set_state(self, s):
         self.state, self.state_t = s, 0.0
-        if s == "gaze_calib":
+        self.events.append(f"state:{s}")
+        if s == "title":
+            self.brain.set_surface("pial")
+            self.brain.camera.sway = None
+            self.brain.camera.goal_dist = 3.3
+        elif s == "connect":
+            self.brain.set_surface("infl")
+            self.brain.camera.yaw, self.brain.camera.pitch, self.brain.camera.goal_dist = -100.0, 30.0, 3.7
+            self.brain.camera.sway = (-105.0, 25.0)       # ゲーム中は左半球の外側面を見ながら ±25° 揺れる
+        elif s == "gaze_calib":
             self.gaze.calib.start()
             self.dwell.reset()
+        elif s == "stage_intro":
+            self.build_cortex(self.stage)
+            self.robot.reset()
+            self.selected = None
+            self.extra_items = []
+            self.virtual.spawn(avoid=[self.robot.pos, GOAL_POS])
+            self.grip_switch = GripSwitch()
+        elif s == "hand_calib":
+            self.hand_calib.start()
+        elif s == "play":
+            if self.mission is None or self.mission.stage is not self.stage:
+                self.mission = Mission(self.stage)
+            self.next_acc_log = 0.0
 
-    def notify(self, text, sec=4.0):
+    def start_game(self):
+        self.results = []
+        self.stage_idx = self.first_stage
+        self.mission = None
+        self.set_state("connect")
+
+    def notify(self, text, sec=3.5):
         print(f"[main] {text}")
         self.message, self.message_until = text, time.monotonic() + sec
 
+    @property
+    def goal(self):
+        return Goal(GOAL_POS, self.stage.goal_radius)
+
+    # --------------------------------------------------------
+    # キー・マウス
+    # --------------------------------------------------------
     def on_key(self, window, key, scancode, action, mods):
         if action != glfw.PRESS:
             return
+        go = key in (glfw.KEY_SPACE, glfw.KEY_ENTER)
         if key == glfw.KEY_ESCAPE:
             glfw.set_window_should_close(window, True)
-        elif key == glfw.KEY_G:
-            self.show_gaze = not self.show_gaze
-        elif key == glfw.KEY_C and self.state != "connect" and not self.test_mode:
-            self.set_state("gaze_calib")
-        elif key == glfw.KEY_V:
-            self.use_virtual = not self.use_virtual
-            if self.use_virtual:
-                self.virtual.spawn(avoid=[self.robot.pos, self.goal.pos])
-            self.selected = None
-            self.notify("仮想アイテム" if self.use_virtual else "現実の色の物をアイテムにする")
-        elif key == glfw.KEY_R:
-            self.robot.reset()
-            self.selected = None
-        elif key == glfw.KEY_P and self.vision is not None and not self.test_mode:
-            # 色の登録：画面中央の枠に見せている物の色を、新しいアイテムの色として追加する（最大 3 色、古いものから上書き）
-            self.n_registered = getattr(self, "n_registered", 0) + 1
-            name = f"color{(self.n_registered - 1) % 3 + 1}"
-            self.vision.register_color(name)
-            self.pending_register = name
-        elif key == glfw.KEY_T and self.vision is not None:
-            self.test_mode = not self.test_mode
-            self.notify("テストモード（マウス）" if self.test_mode else "カメラモード")
-            if not self.test_mode and not self.gaze.calibrated and self.state == "play":
-                self.set_state("gaze_calib")
         elif key == glfw.KEY_D and self.vision is not None:
             self.debug_on = not self.debug_on
             self.vision.debug_enabled = self.debug_on
             if not self.debug_on:
                 cv2.destroyWindow(DEBUG_WINDOW)
                 cv2.waitKey(1)
+        elif key == glfw.KEY_T and self.vision is not None and self.state == "title":
+            self.test_mode = not self.test_mode
+            self.use_virtual = self.test_mode or self.use_virtual
+        elif self.state == "title" and go:
+            self.start_game()
+        elif self.state == "stage_intro" and go:
+            self.set_state("hand_calib")
+        elif self.state == "stage_clear" and go:
+            self.next_stage()
+        elif self.state == "result" and go:
+            self.set_state("title")
+        elif key == glfw.KEY_G:
+            self.show_gaze = not self.show_gaze
+        elif key == glfw.KEY_C and self.state == "play" and not self.test_mode:
+            self.resume_play = True                      # 視線同期をやり直したら play に戻る
+            self.set_state("gaze_calib")
+        elif key == glfw.KEY_L and self.state == "play" and not self.recalibrating:
+            self.recalibrating = True                   # 再同期（制限時間は進み続ける）
+            self.hand_calib.start()
+            self.events.append("recalibrate_start")
+            self.notify("再同期を開始：ターゲットを手で追いかける")
+        elif key == glfw.KEY_V and self.state == "play":
+            self.use_virtual = not self.use_virtual
+            self.selected = None
+            self.notify("仮想アイテム" if self.use_virtual else "現実の色の物をアイテムにする")
+        elif key == glfw.KEY_P and self.vision is not None and not self.test_mode:
+            self.n_registered = getattr(self, "n_registered", 0) + 1
+            name = f"color{(self.n_registered - 1) % 3 + 1}"
+            self.vision.register_color(name)
+            self.pending_register = name
+        elif key == glfw.KEY_R and self.state == "play":
+            self.robot.reset()
+            self.selected = None
 
-    # --------------------------------------------------------
-    # 入力
-    # --------------------------------------------------------
+    def on_mouse_button(self, window, button, action, mods):
+        if button == glfw.MOUSE_BUTTON_LEFT:
+            self.mouse_down = action == glfw.PRESS
+            if action == glfw.PRESS and self.state == "title" and self.view.start_button_hit(self.mouse_layout()):
+                self.start_game()
+
     def mouse_layout(self):
         mx, my = glfw.get_cursor_pos(self.window)
         ww, wh = glfw.get_window_size(self.window)
         return np.array([mx * W / ww, my * H / wh])
 
+    # --------------------------------------------------------
+    # 入力
+    # --------------------------------------------------------
     def read_inputs(self, now, dt):
-        """(手の状態, 手の開き具合, 注視点, 色の塊のリスト)"""
+        """(手の状態, 本当の握り具合 g, 注視点, 色の塊, 視線の特徴量)"""
         if self.test_mode:
             m = self.mouse_layout()
             inside = AX <= m[0] <= AX + AW and AY <= m[1] <= AY + AH
             hand = self.mouse_hand.update((m[0] - AX) / AW, 1.0 - (m[1] - AY) / AH, inside, now)
+            g = 1.0 if self.mouse_down else 0.0            # クリック = 握る
             gaze = self.gaze.update(None, dt, mouse=m) if inside else None
-            return hand, None, gaze, []
+            return hand, g, gaze, [], None
         vs = self.vision.get_state()
+        if vs.hand_open is not None:
+            self.last_g = 1.0 - vs.hand_open             # 手が一瞬見えなくなっても、握り具合は直前の値を保つ
         gaze = self.gaze.update(vs.gaze_feat, dt, feat_time=vs.gaze_time) if self.gaze.calibrated else None
-        return vs.hand, vs.hand_open, gaze, vs.blobs
+        return vs.hand, self.last_g, gaze, vs.blobs, vs.gaze_feat
 
-    def current_items(self, blobs, now, dt):
-        if self.use_virtual:
-            return self.virtual.items
-        return self.real_items.update(blobs, now, dt)
+    def items(self, blobs, now, dt):
+        base = self.virtual.items if self.use_virtual else self.real_items.update(blobs, now, dt)
+        return base + self.extra_items
 
     # --------------------------------------------------------
     # メインループ
@@ -241,62 +285,201 @@ class Game:
                     fps = 0.95 * fps + 0.05 / dt if fps > 0 else 1.0 / dt
                 glfw.poll_events()
                 self.state_t += dt
-
-                feat = None if self.test_mode else self.vision.get_state().gaze_feat
                 self.check_color_register()
-                hand, hand_open, gaze, blobs = self.read_inputs(now, dt)
-                items = self.current_items(blobs, now, dt)
 
-                # ---- 運動野のシミュレーション（20 ms 刻み）----
+                hand, g, gaze, blobs, feat = self.read_inputs(now, dt)
+                self.hand = hand
+                items = self.items(blobs, now, dt)
+
+                # ---- 運動野のシミュレーション（20 ms 刻み）。同期フェーズのデータもここで集める ----
                 acc += dt
                 steps = 0
                 while acc >= config.DT and steps < config.MAX_STEPS_PER_FRAME:
-                    self.cortex.step(hand.vel)
+                    self.cortex.step(hand.vel, g, hand.detected)
+                    if self.hand_calib.active:
+                        if self.hand_calib.step(self.cortex.rate_hat, self.cortex.grip_rate_hat, hand.vel, g,
+                                                hand.detected):
+                            self.finish_hand_calib()
                     acc -= config.DT
                     steps += 1
                 if steps == config.MAX_STEPS_PER_FRAME:
                     acc = 0.0
                 self.cortex.decay(dt)
 
-                # ---- 状態ごとの処理 ----
-                selecting = 0.0
-                if self.state == "connect":
-                    if self.state_t >= CONNECT_SEC:
-                        self.set_state("play" if self.test_mode else "gaze_calib")
-                elif self.state == "gaze_calib":
-                    selecting = 1.0
-                    if self.test_mode:
-                        self.gaze.calib.cancel()
-                        self.set_state("play")
-                    elif self.gaze.calib.step(feat, dt):
-                        self.gaze.reset_filters()
-                        self.gaze.reset_offset()
-                        self.notify(f"視線同期 完了（ずれ 約 {self.gaze.calib.residual:.0f} 画素）")
-                        self.set_state("play")
-                elif self.state == "play":
-                    targets = [("goal", world_to_screen(self.goal.pos), self.goal.radius / config.WORLD_W * AW)]
-                    targets += [(it.id, world_to_screen(it.pos), it.radius / config.WORLD_W * AW) for it in items]
-                    chosen = self.dwell.update(gaze, targets, dt, exclude=self.selected)
-                    if chosen is not None:
-                        self.select(chosen, items)
-                    if self.dwell.focus is not None:
-                        selecting = 0.4 + 0.6 * self.dwell.progress
+                selecting = self.update_state(dt, gaze, feat, items)
                 self.robot.update(dt)
 
-                # ---- 脳の光：視線で選ぶ → 前頭眼野・視覚野、手を動かす → 運動野 ----
-                motor = self.cortex.motor_drive
-                self.brain.update_glow({"fef": selecting, "visual": selecting, "motor": motor, "hand": motor}, dt)
+                # ---- 脳の光 ----
+                #   視線で選ぶ → 前頭眼野・視覚野、手を動かす → 運動野、握る → 運動野 + 体性感覚野
+                motor = max(self.cortex.motor_drive, self.cortex.grip_drive)
+                self.brain.update_glow({"fef": selecting, "visual": selecting, "motor": motor, "hand": motor,
+                                        "somato": self.cortex.grip_drive}, dt)
 
-                self.render(now - start, dt, hand, hand_open, gaze, items, fps)
+                self.view.render(now - start, dt, gaze, items, fps)
+                self.log_frame(now - start, gaze, g)
                 self.update_debug_window()
         finally:
             if self.vision is not None:
                 self.vision.stop()
             cv2.destroyAllWindows()
             glfw.terminate()
+            path = self.logger.save()
+            if path:
+                print(f"[main] プレイログを保存しました: {path}")
 
+    def update_state(self, dt, gaze, feat, items):
+        """状態ごとの処理。視線で選んでいる強さ（脳の前頭眼野・視覚野の光）を返す"""
+        s = self.state
+        if s == "connect" and self.state_t >= CONNECT_SEC:
+            self.set_state("stage_intro" if self.test_mode else "gaze_calib")
+        elif s == "gaze_calib":
+            if self.test_mode:
+                self.gaze.calib.cancel()
+                self.after_gaze_calib()
+            elif self.gaze.calib.step(feat, dt):
+                self.gaze.reset_filters()
+                self.gaze.reset_offset()
+                self.notify(f"視線同期 完了（ずれ 約 {self.gaze.calib.residual:.0f} 画素）")
+                self.after_gaze_calib()
+            return 1.0
+        elif s == "stage_intro" and self.state_t >= config.STAGE_INTRO_SEC:
+            self.set_state("hand_calib")
+        elif s == "play":
+            return self.update_play(dt, gaze, items)
+        return 0.0
+
+    def after_gaze_calib(self):
+        if self.resume_play:
+            self.resume_play = False
+            self.state, self.state_t = "play", 0.0
+        else:
+            self.set_state("stage_intro")
+
+    def finish_hand_calib(self):
+        hc = self.hand_calib
+        if not hc.enough:
+            msg = "同期に失敗：手が見えていないか、握る・開くができていません"
+            self.events.append("hand_calib_failed")
+            if self.state == "hand_calib":
+                self.notify(msg + " → もう一度", 4.0)
+                hc.start()
+            else:
+                self.notify(msg, 4.0)
+                self.recalibrating = False
+            return
+        info = self.cortex.fit(*hc.data())
+        self.events.append(f"hand_calib_ok:r2={info['r2']:.2f}")
+        self.notify(f"同期完了（ニューロン {self.cortex.n_alive} 個、学習データでの R² = {info['r2']:.2f}）")
+        self.grip_switch = GripSwitch()
+        self.recalibrating = False
+        if self.state == "hand_calib":
+            self.set_state("play")
+
+    # --------------------------------------------------------
+    def update_play(self, dt, gaze, items):
+        m = self.mission
+        m.tick(dt)
+        st = self.stage
+
+        # ---- 電極劣化イベント（ステージ 3）----
+        if st.degrade_at is not None and not m.degraded and m.play_time >= st.degrade_at:
+            m.degraded = True
+            k = self.cortex.dropout(st.degrade_fraction, config.DEGRADE_GRIP_FRACTION)
+            m.log(f"degrade:{k}")
+            self.events.append(f"degrade:{k}")
+            self.banner, self.banner_until = "electrode", time.monotonic() + 5.0
+
+        # ---- デコード精度の推移を記録 ----
+        if m.play_time >= self.next_acc_log:
+            self.cortex.metrics.compute()
+            m.result.accuracy.append((m.play_time, self.cortex.metrics.corr, self.cortex.metrics.rmse))
+            self.next_acc_log = m.play_time + config.ACCURACY_LOG_SEC
+
+        selecting = 0.0
+        if not self.recalibrating:
+            # ---- 視線で選ぶ：持っていないときはアイテムだけ、持っているときはゴールだけを選べる ----
+            #      （アームを動かしている間に視線が別の物に留まって、運ぶ途中で行き先が変わらないように）
+            if m.held is None:
+                targets = [(it.id, world_to_screen(it.pos), world_radius(it.radius)) for it in items
+                           if m.selectable(it)]
+            else:
+                targets = [("goal", world_to_screen(GOAL_POS), world_radius(st.goal_radius))]
+            chosen = self.dwell.update(gaze, targets, dt, exclude=self.selected)
+            if chosen is not None:
+                self.select(chosen, items)
+            if self.dwell.focus is not None:
+                selecting = 0.4 + 0.6 * self.dwell.progress
+
+            # ---- 手 → アーム（デコードした速度）、握る → グリッパー（デコードした把持）----
+            if not self.robot.moving:
+                self.robot.drive_arm(self.cortex.v_hat * config.ARM_VEL_GAIN, dt)
+            ev = self.grip_switch.update(self.cortex.grip.value)
+            if ev is not None:
+                self.on_grip_event(ev, items)
+        else:
+            self.robot.drive_arm(np.zeros(2), dt)
+
+        if m.held is not None:                     # つかんでいる荷物はグリッパーといっしょに動く
+            m.held.pos = gripper_tip(self.robot)
+
+        if m.done:
+            self.recalibrating = False
+            self.hand_calib.cancel()
+            self.results.append(m.finish())
+            self.events.append(f"stage_end:score={m.result.score}")
+            self.set_state("stage_clear")
+        return selecting
+
+    def on_grip_event(self, ev, items):
+        m = self.mission
+        self.robot.set_grip(ev == "close")
+        tip = gripper_tip(self.robot)
+        self.events.append(f"grip_{ev}")
+        if ev == "close":
+            res = m.on_close(tip, items)
+            if res == "miss":
+                self.notify("つかみ損ね（失敗 +1）")
+            elif res is not None:
+                if res[1] is not None:                     # 現実の物をスキャンして作った荷物
+                    self.extra_items.append(res[1])
+                    self.notify("スキャンしてつかんだ！ ゴールを見つめて移動")
+                else:
+                    self.notify("つかんだ！ ゴールを見つめて移動")
+                self.selected = None
+            return
+        res = m.on_open(tip, self.goal)
+        if res is None:
+            return
+        kind, it, pts, d = res
+        if kind == "deliver":
+            self.notify(f"成功！ +{pts}（ゴールの中心から {world_radius(d):.0f} 画素）")
+        else:
+            self.notify("ゴールの外に落とした（失敗 +1）")
+        self.selected = None
+
+    def select(self, chosen, items):
+        """視線で対象が決定されたとき：ずれを補正し、ロボットの台座をその近くへ移動させる"""
+        pos = GOAL_POS if chosen == "goal" else next((i.pos for i in items if i.id == chosen), None)
+        if pos is None:
+            return
+        if not self.test_mode:
+            self.gaze.correct(world_to_screen(pos))
+        self.selected = chosen
+        self.robot.approach(pos)
+        self.robot.offset = None
+        self.events.append(f"lock:{chosen}")
+        self.notify("ゴールをロックオン → 移動" if chosen == "goal" else "アイテムをロックオン → 移動")
+
+    def next_stage(self):
+        if self.stage_idx + 1 >= len(STAGES):
+            self.set_state("result")
+            return
+        self.stage_idx += 1
+        self.mission = None
+        self.set_state("stage_intro")
+
+    # --------------------------------------------------------
     def check_color_register(self):
-        """P キーの色の登録の結果を受け取る（登録は vision のスレッドで次のフレームに行われる）"""
         name = getattr(self, "pending_register", None)
         if name is None or self.vision is None:
             return
@@ -307,30 +490,28 @@ class Game:
         if res[1] is None:
             self.notify("色を登録できませんでした：中央の枠に色のはっきりした物を入れてください")
         else:
-            config.ITEM_COLORS[name] = res[1]          # アイテムの表示色にも使う
+            config.ITEM_COLORS[name] = res[1]
             self.use_virtual = False
-            lo, hi = res[1]["hsv"][0][0][0], res[1]["hsv"][-1][1][0]
-            self.notify(f"色を登録しました（{name}、色相 {lo}〜{hi}）")
+            self.notify(f"色を登録しました（{name}）")
 
-    def select(self, chosen, items):
-        """視線で対象が決定されたとき：ロボットの台座をその近くへ移動させる"""
-        if not self.test_mode:      # ずれの補正：ユーザーはこの対象を見ていたとみなす
-            if chosen == "goal":
-                self.gaze.correct(world_to_screen(self.goal.pos))
-            else:
-                it = next((i for i in items if i.id == chosen), None)
-                if it is not None:
-                    self.gaze.correct(world_to_screen(it.pos))
-        if chosen == "goal":
-            self.selected = "goal"
-            self.robot.approach(self.goal.pos)
-            self.notify("ゴールをロックオン → 移動")
-            return
-        it = next((i for i in items if i.id == chosen), None)
-        if it is not None:
-            self.selected = it.id
-            self.robot.approach(it.pos)
-            self.notify(f"アイテム（{it.color}）をロックオン → 移動")
+    def log_frame(self, t, gaze, g):
+        m = self.mission if self.state == "play" else None
+        h = self.hand
+        self.logger.record(
+            time_sec=t, state=self.state + ("+recal" if self.recalibrating else ""), stage=self.stage.number,
+            mode="test" if self.test_mode else "camera",
+            gaze_x=None if gaze is None else float(gaze[0]), gaze_y=None if gaze is None else float(gaze[1]),
+            dwell_target=self.dwell.focus, dwell_progress=self.dwell.progress,
+            hand_detected=int(h.detected), true_vx=float(h.vel[0]), true_vy=float(h.vel[1]),
+            decoded_vx=float(self.cortex.v_hat[0]), decoded_vy=float(self.cortex.v_hat[1]),
+            decoder="LIN" if self.cortex.calibrated else "PV", true_grip=float(g),
+            decoded_grip=float(self.cortex.grip.value), gripper_closed=int(self.grip_switch.closed),
+            holding=int(m is not None and m.held is not None),
+            robot_x=float(self.robot.pos[0]), robot_y=float(self.robot.pos[1]),
+            n_alive=self.cortex.n_alive, n_neurons=self.cortex.n_all,
+            score=None if m is None else m.result.score, time_left=None if m is None else m.time_left,
+            event=";".join(self.events))
+        self.events = []
 
     def update_debug_window(self):
         if not self.debug_on or self.vision is None:
@@ -340,251 +521,12 @@ class Game:
             cv2.imshow(DEBUG_WINDOW, frame)
         cv2.waitKey(1)
 
-    # --------------------------------------------------------
-    # 描画
-    # --------------------------------------------------------
-    def render(self, t, dt, hand, hand_open, gaze, items, fps):
-        fb_w, fb_h = glfw.get_framebuffer_size(self.window)
-        if fb_w == 0 or fb_h == 0:
-            return
-        sx, sy = fb_w / W, fb_h / H
-        gl.glViewport(0, 0, fb_w, fb_h)
-        gl.glClearColor(0.025, 0.03, 0.05, 1.0)
-        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
-        gl.glEnable(gl.GL_BLEND)
-        gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
-        b = self.batch
-
-        # ---- AR の背景（カメラ映像）----
-        if not self.test_mode:
-            fid, frame = self.vision.get_frame()
-            if frame is not None:
-                if fid != self._ar_frame_id:
-                    self.ar_quad.upload(frame)
-                    self._ar_frame_id = fid
-                self.ar_quad.draw(AX, AY, AW, AH)
-            b.rect(AX, AY, AW, AH, (0.0, 0.0, 0.03, 1.0 - config.AR_DIM))
-        else:
-            b.rect(AX, AY, AW, AH, (0.05, 0.06, 0.09, 1.0))
-            for k in range(1, 8):
-                b.line(AX + AW * k / 8, AY, AX + AW * k / 8, AY + AH, 1, (0.12, 0.14, 0.2, 1.0))
-            for k in range(1, 6):
-                b.line(AX, AY + AH * k / 6, AX + AW, AY + AH * k / 6, 1, (0.12, 0.14, 0.2, 1.0))
-
-        # ---- 色の登録の枠（カメラモードで現実の色の物を使うとき）----
-        if not self.test_mode and not self.use_virtual:
-            x0, y0, x1, y1 = config.COLOR_REGISTER_BOX
-            p0 = (AX + x0 * AW, AY + y0 * AH)
-            p1 = (AX + x1 * AW, AY + y1 * AH)
-            c = (1.0, 1.0, 1.0, 0.35)
-            for (ax, ay), (bx_, by_) in (((p0[0], p0[1]), (p1[0], p0[1])), ((p1[0], p0[1]), (p1[0], p1[1])),
-                                         ((p1[0], p1[1]), (p0[0], p1[1])), ((p0[0], p1[1]), (p0[0], p0[1]))):
-                for k in range(0, 10, 2):
-                    b.line(ax + (bx_ - ax) * k / 10, ay + (by_ - ay) * k / 10,
-                           ax + (bx_ - ax) * (k + 1) / 10, ay + (by_ - ay) * (k + 1) / 10, 1.5, c)
-
-        # ---- 地面の上のもの（ゴール、ロボットの影）----
-        gp = world_to_screen(self.goal.pos)
-        gr = self.goal.radius / config.WORLD_W * AW
-        b.circle(*gp, gr, (0.2, 1.0, 0.5, 0.12))
-        b.ring(*gp, gr, 3, (0.3, 1.0, 0.55, 0.9))
-        b.line(gp[0] - gr * 0.5, gp[1], gp[0] + gr * 0.5, gp[1], 2, (0.3, 1.0, 0.55, 0.7))
-        b.line(gp[0], gp[1] - gr * 0.5, gp[0], gp[1] + gr * 0.5, 2, (0.3, 1.0, 0.55, 0.7))
-        rp = world_to_screen(self.robot.pos)
-        b.circle(rp[0] + 6, rp[1] + 8, 52, (0, 0, 0, 0.35), 24)
-        if self.robot.goal is not None:      # 目的地への点線
-            q = world_to_screen(self.robot.goal)
-            for k in range(0, 12, 2):
-                b.line(*(rp + (q - rp) * k / 12), *(rp + (q - rp) * (k + 1) / 12), 2, (0.4, 0.85, 1.0, 0.6))
-        b.flush()
-
-        # ---- ロボットと仮想アイテム（3D）----
-        self.robot_view.draw(self.robot, items, (int(AX * sx), int((H - AY - AH) * sy), int(AW * sx), int(AH * sy)))
-        gl.glViewport(0, 0, fb_w, fb_h)
-
-        # ---- 上に重ねるもの：アイテムの枠、ドウェルのリング、注視点、視線同期の点 ----
-        for it in items:
-            p = world_to_screen(it.pos)
-            r = it.radius / config.WORLD_W * AW + 8
-            c = it.rgb
-            if it.kind == "real":
-                b.ring(*p, r, 2.5, (*c, 0.95))
-                for k in range(4):                      # 照準のような 4 本の線
-                    a = k * math.pi / 2 + t * 0.8
-                    b.line(p[0] + math.cos(a) * r, p[1] + math.sin(a) * r,
-                           p[0] + math.cos(a) * (r + 10), p[1] + math.sin(a) * (r + 10), 2, (*c, 0.95))
-            if self.selected == it.id:
-                b.ring(*p, r + 14, 2, (1.0, 1.0, 1.0, 0.8))
-        if self.selected == "goal":
-            b.ring(*gp, gr + 12, 2, (1.0, 1.0, 1.0, 0.8))
-        if self.state == "play" and self.dwell.focus is not None and self.dwell.focus_pos is not None:
-            p = self.dwell.focus_pos
-            self._progress_ring(p, 40, self.dwell.progress, (1.0, 0.85, 0.3))
-        if self.state == "gaze_calib":
-            self._draw_calib(t)
-        if self.show_gaze and gaze is not None and self.state != "gaze_calib":
-            b.circle(*gaze, 6, (1.0, 1.0, 1.0, 0.85), 12)
-            b.ring(*gaze, 11, 1.5, (0.2, 0.9, 1.0, 0.8), 20)
-        b.rect(AX - 1, AY - 1, AW + 2, 1, (0.3, 0.4, 0.55, 1))
-        b.rect(AX - 1, AY + AH, AW + 2, 1, (0.3, 0.4, 0.55, 1))
-        b.rect(AX - 1, AY, 1, AH, (0.3, 0.4, 0.55, 1))
-        b.rect(AX + AW, AY, 1, AH, (0.3, 0.4, 0.55, 1))
-        rx, ry, rw, rh = config.RASTER_RECT
-        b.rect(rx - 1, ry - 1, rw + 2, rh + 2, (0.25, 0.3, 0.4, 1.0))
-        b.rect(BX, BY, BW, BH, (0.035, 0.04, 0.065, 1.0))
-        b.flush()
-
-        # ---- 脳 ----
-        self.brain.draw((int(BX * sx), int((H - BY - BH) * sy), int(BW * sx), int(BH * sy)), t, dt,
-                        self.cortex.flash, self.cortex.activity, self.cortex.pop.alive)
-        gl.glViewport(0, 0, fb_w, fb_h)
-        gl.glEnable(gl.GL_BLEND)
-
-        # ---- ラスター ----
-        self.raster_quad.upload(self.cortex.raster)
-        self.raster_quad.draw(rx, ry, rw, rh)
-
-        # ---- 文字 ----
-        if t - self._last_overlay >= config.OVERLAY_INTERVAL:
-            self._draw_overlay(t, hand, hand_open, gaze, items, fps)
-            self.overlay.upload(self.overlay_img)
-            self._last_overlay = t
-        self.overlay.draw(0, 0, W, H)
-        gl.glDisable(gl.GL_BLEND)
-        glfw.swap_buffers(self.window)
-
-    def _progress_ring(self, p, r, progress, color):
-        """見つめている間にたまっていくリング（progress 0〜1）"""
-        b = self.batch
-        b.ring(*p, r, 3, (*color, 0.25), 48)
-        seg = max(1, int(48 * progress))
-        for k in range(seg):
-            a0 = -math.pi / 2 + 2 * math.pi * k / 48
-            a1 = -math.pi / 2 + 2 * math.pi * (k + 1) / 48
-            b.line(p[0] + r * math.cos(a0), p[1] + r * math.sin(a0),
-                   p[0] + r * math.cos(a1), p[1] + r * math.sin(a1), 5, (*color, 0.95))
-
-    def _draw_calib(self, t):
-        """視線同期：今の点を大きく光らせ、集めている間はリングがたまる"""
-        b = self.batch
-        b.rect(AX, AY, AW, AH, (0.0, 0.02, 0.05, 0.55))
-        cal = self.gaze.calib
-        for i, p in enumerate(cal.points):
-            done = i < cal.index
-            b.circle(*p, 5, (0.3, 1.0, 0.6, 0.9) if done else (0.5, 0.55, 0.65, 0.5), 12)
-        p = cal.current_point
-        if p is None:
-            return
-        pulse = 0.5 + 0.5 * math.sin(t * 8)
-        shrink = 1.0 - min(1.0, cal.t / config.GAZE_CALIB_SETTLE)
-        b.ring(*p, 16 + 40 * shrink, 2, (0.4, 0.9, 1.0, 0.6 + 0.3 * pulse), 40)
-        b.circle(*p, 7, (1.0, 1.0, 1.0, 1.0), 16)
-        if cal.collecting:
-            self._progress_ring(p, 26, (cal.t - config.GAZE_CALIB_SETTLE) / config.GAZE_CALIB_COLLECT,
-                                (0.4, 0.9, 1.0))
-
-    @staticmethod
-    def _text(img, text, x, y, scale=0.45, color=(225, 230, 240), thick=1):
-        cv2.putText(img, text, (int(x), int(y)), cv2.FONT_HERSHEY_SIMPLEX, scale, (*color, 255), thick, cv2.LINE_AA)
-
-    def _jt(self, img, ja, en, x, y, size=18, color=(255, 255, 255), anchor="left"):
-        """日本語が書ければ日本語、書けなければ英語（cv2）で書く"""
-        if self.jtext.available:
-            self.jtext.draw(img, ja, x, y, size, color, anchor)
-        else:
-            if anchor == "center":
-                (tw, _), _ = cv2.getTextSize(en, cv2.FONT_HERSHEY_SIMPLEX, size / 30, 1)
-                x -= tw / 2
-            self._text(img, en, x, y + size * 0.8, size / 30, color)
-
-    def _draw_overlay(self, t, hand, hand_open, gaze, items, fps):
-        img = self.overlay_img
-        img[:] = 0
-        T = self._text
-        dim = (150, 160, 185)
-
-        # ---- 状態ごとの大きな表示 ----
-        cx, cy = AX + AW / 2, AY + AH / 2
-        if self.state == "connect":
-            k = min(1.0, self.state_t / config.MORPH_SEC)
-            cv2.rectangle(img, (int(cx - 230), int(cy - 50)), (int(cx + 230), int(cy + 50)), (6, 10, 24, 210), -1)
-            self._jt(img, "脳と接続中…", "LINKING TO THE BRAIN...", cx, cy - 36, 32, (130, 220, 255), "center")
-            cv2.rectangle(img, (int(cx - 180), int(cy + 22)), (int(cx + 180), int(cy + 30)), (60, 70, 90, 255), -1)
-            cv2.rectangle(img, (int(cx - 180), int(cy + 22)), (int(cx - 180 + 360 * k), int(cy + 30)),
-                          (130, 220, 255, 255), -1)
-        elif self.state == "gaze_calib":
-            cal = self.gaze.calib
-            cv2.rectangle(img, (int(cx - 260), int(AY + 18)), (int(cx + 260), int(AY + 92)), (6, 10, 24, 210), -1)
-            npts = len(cal.points)
-            self._jt(img, f"視線同期  {min(cal.index + 1, npts)} / {npts}", f"GAZE SYNC  {min(cal.index + 1, npts)} / {npts}",
-                     cx, AY + 24, 28, (130, 220, 255), "center")
-            face = self.vision.get_state().face_detected if self.vision else False
-            self._jt(img, "光る点を見つめてください（頭は楽に）" if face else "顔が見つかりません：カメラの正面へ",
-                     "Look at the glowing dot" if face else "Face not found: face the camera",
-                     cx, AY + 62, 18, (220, 225, 235) if face else (255, 140, 120), "center")
-
-        # ---- 対象の名前 ----
-        for it in items:
-            p = world_to_screen(it.pos)
-            r = it.radius / config.WORLD_W * AW + 22
-            T(img, f"{it.color} {'(real)' if it.kind == 'real' else ''}", p[0] + r * 0.7, p[1] - r * 0.7, 0.45,
-              rgb255(it.rgb))
-        gp = world_to_screen(self.goal.pos)
-        T(img, "GOAL", gp[0] - 20, gp[1] + self.goal.radius / config.WORLD_W * AW + 18, 0.5, (90, 255, 140))
-
-        if self.message and time.monotonic() < self.message_until:
-            self._jt(img, self.message, self.message, AX + AW / 2, AY + AH - 40, 20, (255, 255, 255), "center")
-
-        # ---- 脳の凡例 ----
-        T(img, "BRAIN (left hemisphere = right hand)", BX + 8, BY + 18, 0.42, dim)
-        y = BY + BH - 52
-        for name, label in (("motor", "motor (hand)"), ("somato", "somatosensory"), ("fef", "frontal eye field"),
-                            ("visual", "visual")):
-            from brain_model import REGION_ID
-            g = self.brain.glow[REGION_ID[name]]
-            c = rgb255(REGION_COLORS[name])
-            x = BX + 10 + (0 if name in ("motor", "fef") else 190)
-            yy = y + (0 if name in ("motor", "somato") else 22)
-            cv2.rectangle(img, (x, yy - 10), (x + 12, yy + 2), (*c, 255) if g > 0.3 else (70, 75, 90, 255), -1)
-            T(img, label, x + 18, yy, 0.42, c if g > 0.3 else dim)
-        if self.model.simplified:
-            cv2.rectangle(img, (BX, BY + 26), (BX + BW, BY + 50), (90, 30, 10, 220), -1)
-            self._jt(img, "！" + WARNING_TEXT, "! simplified brain model", BX + 6, BY + 28, 15, (255, 210, 120))
-
-        # ---- HUD（右下）----
-        x, y = PANEL_X, BY + BH + 30
-        T(img, "BCI OPERATOR", x, y, 0.7, (255, 255, 255), 2)
-        T(img, "stage 2 preview: gaze + AR + robot", x, y + 22, 0.42, dim)
-        mode = "TEST MODE (mouse = gaze & hand)" if self.test_mode else "CAMERA MODE"
-        T(img, mode, x, y + 48, 0.48, (255, 200, 110) if self.test_mode else (140, 230, 160))
-        vs = None if self.test_mode else self.vision.get_state()
-        if vs is not None:
-            T(img, f"camera {vs.fps:4.1f} fps  (face {vs.face_fps:4.1f} / hand {vs.hand_fps:4.1f})", x, y + 72, 0.45)
-            gz = (f"gaze: calibrated (err ~{self.gaze.calib.residual:.0f} px)" if self.gaze.calibrated
-                  else "gaze: not calibrated")
-            T(img, gz if vs.face_detected else "gaze: face NOT FOUND", x, y + 94, 0.45,
-              (140, 230, 160) if vs.face_detected and self.gaze.calibrated else (255, 140, 120))
-            ho = "-" if hand_open is None else f"{hand_open:.2f}"
-            T(img, f"hand: {'detected' if hand.detected else 'NOT FOUND'}   open {ho}", x, y + 116, 0.45,
-              (140, 230, 160) if hand.detected else (255, 140, 120))
-        else:
-            T(img, "gaze = mouse position, hand = mouse motion", x, y + 72, 0.45)
-        T(img, f"items: {len(items)} ({'virtual' if self.use_virtual else 'real color objects'})", x, y + 138, 0.45)
-        st = "moving" if self.robot.moving else "idle"
-        T(img, f"robot: {st}   motor drive {self.cortex.motor_drive:.2f}", x, y + 160, 0.45)
-        T(img, f"render {fps:4.1f} fps", x, y + 182, 0.42, dim)
-        T(img, "look ~1 s at an item / GOAL to move the robot", x, y + 212, 0.42, (220, 225, 235))
-        T(img, "G gaze dot  C gaze sync  V virtual/real  P color", x, y + 236, 0.4, dim)
-        T(img, "R reset robot  T test mode  D debug  ESC quit", x, y + 256, 0.4, dim)
-
-        rx, ry, rw, rh = config.RASTER_RECT
-        T(img, "M1 hand-knob spikes", rx + 4, ry + 14, 0.38, (200, 205, 220))
-
 
 def main():
     parser = argparse.ArgumentParser(description="BCI オペレーター")
     parser.add_argument("--camera", type=int, default=config.CAMERA_INDEX)
-    parser.add_argument("--test", action="store_true", help="カメラを使わない（マウスで視線と手の代わり）")
+    parser.add_argument("--test", action="store_true", help="カメラを使わない（マウスで視線・手・握るの代わり）")
+    parser.add_argument("--stage", type=int, default=1, help="このステージから始める（1〜4）")
     Game(parser.parse_args()).run()
 
 

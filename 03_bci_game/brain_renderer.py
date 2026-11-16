@@ -233,16 +233,20 @@ class BrainView:
         擬似ニューロンを左半球の手の領域の表面上にランダムに置く（三角形の面積に比例した一様分布）。
         実際の M1 では好きな方向がきれいな地図状には並んでいないので、置き場所と PD は無関係にしている
         """
-        pts = self.model.sample_hand_points(pop.n, rng)
+        self.set_neurons(pop.n, hue_to_rgb(pop.pd_angle / (2 * np.pi)), rng)
+
+    def set_neurons(self, n, colors, rng):
+        """n 個のニューロンを手の領域に置く（colors：(n, 3) の表示色）"""
+        pts = self.model.sample_hand_points(n, rng)
         for surf, name in (("pial", "offset"), ("infl", "offset2")):
             pos, normal = pts[surf]
             pos = pos + normal * config.NEURON_LIFT_MM + self.shift[surf]["left"]
             self._upload(name, self.to_gl(pos))
-        self.n_neurons = pop.n
-        self._upload("color", hue_to_rgb(pop.pd_angle / (2 * np.pi)))
-        self._upload("flash", np.zeros(pop.n))
-        self._upload("alive", np.ones(pop.n))
-        self._upload("activity", np.zeros(pop.n))
+        self.n_neurons = n
+        self._upload("color", colors)
+        self._upload("flash", np.zeros(n))
+        self._upload("alive", np.ones(n))
+        self._upload("activity", np.zeros(n))
 
     def toggle_focus(self):
         self.focus_hand = not self.focus_hand

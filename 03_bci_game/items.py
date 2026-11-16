@@ -37,8 +37,10 @@ class Item:
     pos: np.ndarray            # ワールド座標
     radius: float              # ワールド座標での半径
     last_seen: float = 0.0
-    held: bool = False         # ロボットがつかんでいるか（段階 3）
+    held: bool = False         # ロボットがつかんでいるか
     angle: float = 0.0         # 仮想アイテムの向き（見た目用）
+    delivered: bool = False    # ゴールに置かれた（もう選べない）
+    scanned: bool = False      # 現実の物をスキャンして作ったデジタルの荷物か
 
     @property
     def rgb(self):
