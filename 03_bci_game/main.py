@@ -22,6 +22,9 @@ BCI オペレーター（ゲーム本体）。実際の BCI 研究の「ハイ�
     ../.venv/bin/python main.py            # カメラ（視線 + 手 + 色の物）
     ../.venv/bin/python main.py --test     # カメラなし：マウスの位置 = 視線、マウスの動き = 手、クリック = 握る
     ../.venv/bin/python main.py --stage 3  # ステージ 3 から始める（確認用）
+    ../.venv/bin/python main.py --light    # 軽量モード（config.apply_light_mode）
+    ../.venv/bin/python main.py --window   # ディスプレイいっぱいにせず、1280×720 のウィンドウで
+F11 で全画面 ⇔ ウィンドウを切りかえる。
 """
 
 import argparse
@@ -114,22 +117,35 @@ class Game:
         self.set_state("title")
 
     def _init_window(self):
+        """
+        ウィンドウを作る。既定ではディスプレイいっぱい（最大化）。中身は決まった解像度のオフスクリーンに描いて
+        ウィンドウの大きさへ拡大するので（render_target.py）、ウィンドウの大きさは自由に変えられる
+        """
         if not glfw.init():
             raise RuntimeError("glfw の初期化に失敗しました")
         glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
         glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
         glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, gl.GL_TRUE)
-        glfw.window_hint(glfw.SAMPLES, config.MSAA_SAMPLES)
-        glfw.window_hint(glfw.RESIZABLE, gl.GL_FALSE)
-        self.window = glfw.create_window(W, H, config.WINDOW_TITLE, None, None)
+        glfw.window_hint(glfw.RESIZABLE, gl.GL_TRUE)
+        monitor = glfw.get_primary_monitor()
+        mode = glfw.get_video_mode(monitor)
+        self.fullscreen = config.WINDOW_MODE == "fullscreen"
+        if self.fullscreen:
+            self.window = glfw.create_window(mode.size.width, mode.size.height, config.WINDOW_TITLE, monitor, None)
+        else:
+            if config.WINDOW_MODE == "maximized":
+                glfw.window_hint(glfw.MAXIMIZED, gl.GL_TRUE)
+            self.window = glfw.create_window(W, H, config.WINDOW_TITLE, None, None)
         if not self.window:
             raise RuntimeError("ウィンドウを作成できませんでした")
+        if config.WINDOW_MODE == "maximized":
+            glfw.maximize_window(self.window)
         glfw.make_context_current(self.window)
         glfw.swap_interval(1)
-        if config.MSAA_SAMPLES > 0:
-            gl.glEnable(gl.GL_MULTISAMPLE)
-        print(f"[main] {gl.glGetString(gl.GL_RENDERER).decode()}")
+        print(f"[main] {gl.glGetString(gl.GL_RENDERER).decode()}  描画の解像度 "
+              f"{round(W * config.RENDER_SCALE)}×{round(H * config.RENDER_SCALE)}"
+              + ("（軽量モード）" if config.LIGHT_MODE else ""))
         glfw.set_key_callback(self.window, self.on_key)
         glfw.set_mouse_button_callback(self.window, self.on_mouse_button)
 
@@ -196,6 +212,8 @@ class Game:
         go = key in (glfw.KEY_SPACE, glfw.KEY_ENTER)
         if key == glfw.KEY_ESCAPE:
             glfw.set_window_should_close(window, True)
+        elif key == glfw.KEY_F11:
+            self.toggle_fullscreen()
         elif key == glfw.KEY_D and self.vision is not None:
             self.debug_on = not self.debug_on
             self.vision.debug_enabled = self.debug_on
@@ -236,6 +254,18 @@ class Game:
             self.robot.reset()
             self.selected = None
 
+    def toggle_fullscreen(self):
+        """F11：全画面 ⇔ ディスプレイいっぱいのウィンドウ"""
+        monitor = glfw.get_primary_monitor()
+        mode = glfw.get_video_mode(monitor)
+        self.fullscreen = not self.fullscreen
+        if self.fullscreen:
+            glfw.set_window_monitor(self.window, monitor, 0, 0, mode.size.width, mode.size.height,
+                                    mode.refresh_rate)
+        else:
+            glfw.set_window_monitor(self.window, None, 0, 0, W, H, 0)
+            glfw.maximize_window(self.window)
+
     def on_mouse_button(self, window, button, action, mods):
         if button == glfw.MOUSE_BUTTON_LEFT:
             self.mouse_down = action == glfw.PRESS
@@ -243,9 +273,8 @@ class Game:
                 self.start_game()
 
     def mouse_layout(self):
-        mx, my = glfw.get_cursor_pos(self.window)
-        ww, wh = glfw.get_window_size(self.window)
-        return np.array([mx * W / ww, my * H / wh])
+        """マウスの位置（論理座標 1280×720。拡大と黒い帯を戻したもの）"""
+        return self.view.window_to_layout(*glfw.get_cursor_pos(self.window))
 
     # --------------------------------------------------------
     # 入力
@@ -340,6 +369,7 @@ class Game:
                 self.gaze.reset_filters()
                 self.gaze.reset_offset()
                 self.notify(f"視線同期 完了（ずれ 約 {self.gaze.calib.residual:.0f} 画素）")
+                self.events.append(f"gaze_calib_ok:err_px={self.gaze.calib.residual:.0f}")
                 self.after_gaze_calib()
             return 1.0
         elif s == "stage_intro" and self.state_t >= config.STAGE_INTRO_SEC:
@@ -358,7 +388,10 @@ class Game:
     def finish_hand_calib(self):
         hc = self.hand_calib
         if not hc.enough:
-            msg = "同期に失敗：手が見えていないか、握る・開くができていません"
+            if hc.valid_sec < config.HC_MIN_SEC:
+                msg = "同期に失敗：手がカメラに映っていない時間が長すぎます"
+            else:
+                msg = "同期に失敗：「握る！」「開く！」の合図に合わせて、しっかり握る・開くをしてください"
             self.events.append("hand_calib_failed")
             if self.state == "hand_calib":
                 self.notify(msg + " → もう一度", 4.0)
@@ -368,7 +401,9 @@ class Game:
                 self.recalibrating = False
             return
         info = self.cortex.fit(*hc.data())
-        self.events.append(f"hand_calib_ok:r2={info['r2']:.2f}")
+        lv = self.cortex.grip.levels
+        self.events.append(f"hand_calib_ok:r2={info['r2']:.2f}:grip_sep={hc.grip_separation:.2f}"
+                           + (f":grip_levels={lv[0]:.2f}/{lv[1]:.2f}" if lv else ""))
         self.notify(f"同期完了（ニューロン {self.cortex.n_alive} 個、学習データでの R² = {info['r2']:.2f}）")
         self.grip_switch = GripSwitch()
         self.recalibrating = False
@@ -413,7 +448,8 @@ class Game:
             # ---- 手 → アーム（デコードした速度）、握る → グリッパー（デコードした把持）----
             if not self.robot.moving:
                 self.robot.drive_arm(self.cortex.v_hat * config.ARM_VEL_GAIN, dt)
-            ev = self.grip_switch.update(self.cortex.grip.value)
+            gd = self.cortex.grip
+            ev = self.grip_switch.update(gd.value, gd.close_th, gd.open_th)
             if ev is not None:
                 self.on_grip_event(ev, items)
         else:
@@ -527,7 +563,14 @@ def main():
     parser.add_argument("--camera", type=int, default=config.CAMERA_INDEX)
     parser.add_argument("--test", action="store_true", help="カメラを使わない（マウスで視線・手・握るの代わり）")
     parser.add_argument("--stage", type=int, default=1, help="このステージから始める（1〜4）")
-    Game(parser.parse_args()).run()
+    parser.add_argument("--light", action="store_true", help="軽量モード（重い PC 向け）")
+    parser.add_argument("--window", action="store_true", help="1280×720 のウィンドウで開く")
+    args = parser.parse_args()
+    if args.light or config.LIGHT_MODE:
+        config.apply_light_mode()
+    if args.window:
+        config.WINDOW_MODE = "window"
+    Game(args).run()
 
 
 if __name__ == "__main__":

@@ -98,9 +98,11 @@ def gaze_features(lm, w, h):
 def hand_openness(lm):
     """
     手の開き具合：指先（人差し指〜小指）と手首の距離の平均を、手のひらの大きさ（手首 → 中指の付け根）で割る。
-    握るとおよそ 1.0 以下、開くと 1.8 以上になるので、それを 0〜1 に直す
+    握るとおよそ 1.0 以下、開くと 1.8 以上になるので、それを 0〜1 に直す。
+    距離は MediaPipe の奥行き z も使った 3 次元で測る（2 次元だと、手を傾けたり指をカメラに向けたりしたときに
+    指先が近く写って「握っている」と判定されやすいため）
     """
-    P = np.array([(p.x, p.y) for p in lm])
+    P = np.array([(p.x, p.y, p.z) for p in lm])
     palm = np.linalg.norm(P[9] - P[0])
     if palm < 1e-6:
         return None

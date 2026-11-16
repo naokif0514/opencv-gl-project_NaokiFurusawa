@@ -75,12 +75,12 @@ class GripSwitch:
         # 「握る」を受け付ける（同期フェーズは握る区間で終わるので、直後に勝手に握ったことにならないように）
         self.closed = True
 
-    def update(self, value):
-        """状態が変わったら "close" / "open" を返す"""
-        if not self.closed and value >= config.GRIP_CLOSE_TH:
+    def update(self, value, close_th=config.GRIP_CLOSE_TH, open_th=config.GRIP_OPEN_TH):
+        """状態が変わったら "close" / "open" を返す（しきい値は把持のデコーダが同期フェーズで決めたもの）"""
+        if not self.closed and value >= close_th:
             self.closed = True
             return "close"
-        if self.closed and value <= config.GRIP_OPEN_TH:
+        if self.closed and value <= open_th:
             self.closed = False
             return "open"
         return None

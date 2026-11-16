@@ -82,12 +82,12 @@ class HandCalibration:
         self.active = False
         self.duration = total_duration()
         self.t = 0.0
-        self.X, self.Y, self.Xg, self.Yg = [], [], [], []
+        self.X, self.Y, self.Xg, self.Yg, self.cue = [], [], [], [], []
 
     def start(self):
         self.active = True
         self.t = 0.0
-        self.X, self.Y, self.Xg, self.Yg = [], [], [], []
+        self.X, self.Y, self.Xg, self.Yg, self.cue = [], [], [], [], []
 
     def cancel(self):
         self.active = False
@@ -125,19 +125,40 @@ class HandCalibration:
             self.Y.append(np.array(v_true))
             self.Xg.append(np.array(grip_rate_hat))
             self.Yg.append(float(g_true))
+            self.cue.append(self._grip_label())
         self.t += dt
         if self.t >= self.duration:
             self.active = False
             return True
         return False
 
+    def _grip_label(self):
+        """
+        握る区間の合図（1 = 握る、0 = 開く）。合図が変わってすぐ（HC_GRIP_SKIP 秒）は手が追いついていないので −1、
+        握る区間以外も −1（把持のデコーダの学習には使わない）
+        """
+        if self.phase != "grip":
+            return -1.0
+        tg = self.t - config.HC_READY_SEC - _reach_total() - config.HC_CIRCLE_SEC
+        if tg % config.HC_GRIP_PERIOD < config.HC_GRIP_SKIP:
+            return -1.0
+        return grip_target(self.t)
+
     def data(self):
-        return np.array(self.X), np.array(self.Y), np.array(self.Xg), np.array(self.Yg)
+        """(方向の発火率, 手の速度, 把持ニューロンの発火率, 合図) の配列"""
+        return np.array(self.X), np.array(self.Y), np.array(self.Xg), np.array(self.cue)
+
+    @property
+    def grip_separation(self):
+        """握る区間で、本当の握り具合（カメラで測ったもの）が合図に合わせてどれだけ変わったか"""
+        if not self.cue:
+            return 0.0
+        cue, g = np.array(self.cue), np.array(self.Yg)
+        if (cue == 1).sum() < 5 or (cue == 0).sum() < 5:
+            return 0.0
+        return float(g[cue == 1].mean() - g[cue == 0].mean())
 
     @property
     def enough(self):
-        """学習に十分なデータか（手が見えていた時間と、握った・開いたの両方があるか）"""
-        if self.valid_sec < config.HC_MIN_SEC or not self.Yg:
-            return False
-        yg = np.array(self.Yg)
-        return (yg > 0.6).sum() >= 10 and (yg < 0.4).sum() >= 10
+        """学習に十分なデータか（手が見えていた時間と、合図に合わせて握る・開くができていたか）"""
+        return self.valid_sec >= config.HC_MIN_SEC and self.grip_separation >= config.GRIP_MIN_SEPARATION

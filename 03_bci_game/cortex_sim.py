@@ -15,8 +15,13 @@ cortex_sim.py
 ■ デコード
   ・速度：同期フェーズ（キャリブレーション）の前は PV 法、後は線形デコーダ（リッジ回帰。decoder.py、02 と同じ）
   ・把持：同期フェーズの前は「把持ニューロンの (r − b0)/m の平均」（モデルの知識だけを使う）、
-          後は把持ニューロンの発火率 → g のリッジ回帰。どちらも少しなめらかにしてから、
+          後は把持ニューロンの発火率 → 握る・開くの合図 のリッジ回帰。どちらも少しなめらかにしてから、
           しきい値にヒステリシスをつけて「握った / 開いた」を決める（mission.py の GripSwitch）
+          学習には、同期フェーズの「握る・開く」の区間（合図が交互に出て、握る・開くのデータが半分ずつある）
+          だけを使う。ターゲットを追う区間も使うと、そのあいだ手が少し丸まっていると「握っている」データばかりに
+          なり、リッジ回帰の推定が平均（握る側）に引き寄せられて、開いても「開いた」のしきい値まで下がらなくなる
+          （実際のプレイログで起きた問題）。さらに、学習後に「開く」「握る」の合図のときの推定値の中央値を求め、
+          その間の GRIP_TH_LO・GRIP_TH_HI の位置をしきい値にする（人ごと・ステージごとの差に合わせる）
   ・脱落（電極劣化イベント）は両方のニューロンに起こる。デコーダはどれが脱落したかを知らないので、
     同期フェーズをやり直す（再キャリブレーション）まで推定がかたよる
 """
@@ -75,19 +80,34 @@ class GripDecoder:
         self.w = None
         self.c = 0.0
         self.value = 0.0          # なめらかにした推定値
+        self.close_th = config.GRIP_CLOSE_TH
+        self.open_th = config.GRIP_OPEN_TH
+        self.levels = None        # 学習データでの (開くときの推定値, 握るときの推定値)
 
     @property
     def ready(self):
         return self.w is not None
 
-    def fit(self, X, y, alpha=config.RIDGE_ALPHA):
-        X, y = np.asarray(X, dtype=np.float64), np.asarray(y, dtype=np.float64)
+    def fit(self, X, cue, alpha=config.GRIP_RIDGE_ALPHA):
+        """X：把持ニューロンの発火率、cue：合図（1 = 握る、0 = 開く、−1 = 使わない）"""
+        X, cue = np.asarray(X, dtype=np.float64), np.asarray(cue, dtype=np.float64)
+        use = cue >= 0
+        X, y = X[use], cue[use]
+        if len(y) < 20 or y.min() == y.max():
+            return False
         xm, ym = X.mean(axis=0), y.mean()
         Xc, yc = X - xm, y - ym
         G = Xc.T @ Xc
         lam = alpha * max(np.trace(G) / self.n, 1e-9)
         self.w = np.linalg.solve(G + lam * np.eye(self.n), Xc.T @ yc)
         self.c = ym - xm @ self.w
+        # しきい値を、この人のデータに合わせる（開く・握るのときの推定値の中央値の間）
+        pred = X @ self.w + self.c
+        lo, hi = float(np.median(pred[y == 0])), float(np.median(pred[y == 1]))
+        self.levels = (lo, hi)
+        self.open_th = lo + config.GRIP_TH_LO * (hi - lo)
+        self.close_th = lo + config.GRIP_TH_HI * (hi - lo)
+        return True
 
     def step(self, rate_hat, dt=config.DT):
         if self.w is None:
@@ -208,10 +228,10 @@ class CortexSim:
         self.dropped_since_calib += k
         return k
 
-    def fit(self, X, Y, Xg, Yg):
+    def fit(self, X, Y, Xg, cue):
         """同期フェーズで集めたデータで、速度と把持の線形デコーダを学習する"""
         info = self.lin.fit(X, Y, n_alive=self.pop.n_alive)
-        self.grip.fit(Xg, Yg)
+        self.grip.fit(Xg, cue)
         self.metrics.reset()
         self.dropped_since_calib = 0
         return info
