@@ -272,18 +272,21 @@ class DwellSelector:
     def reset(self):
         self.focus, self.progress, self.focus_pos = None, 0.0, None
 
-    def update(self, gaze, targets, dt, exclude=None):
+    def update(self, gaze, targets, dt, current=None, dwell_sec=None):
         """
         決定したらその id を返す（それ以外は None）。
-        exclude：今選ばれている対象の id（見続けても、同じ対象を何度も選び直さないように除く）
+        current：今の行き先の id。候補から外さずに残し、CURRENT_PULL_PX だけ近いものとして扱う。
+                 視線が今の行き先に吸い付いているあいだは何も起きない（隣の物に乗り換えない・選び直さない）
+        dwell_sec：決定までに見つめる時間（行き先を乗り換えるときは長くする）
         """
+        dwell_sec = config.DWELL_SEC if dwell_sec is None else dwell_sec
         best, best_d, best_pos = None, None, None
         cur_d, cur_pos = None, None
         if gaze is not None:
             for tid, pos, radius in targets:
-                if tid == exclude:
-                    continue
                 d = np.linalg.norm(np.asarray(pos) - gaze) - radius
+                if tid == current:
+                    d -= config.CURRENT_PULL_PX
                 if tid == self.focus:
                     cur_d, cur_pos = d, pos
                 if d <= config.SNAP_PX and (best_d is None or d < best_d):
@@ -293,8 +296,9 @@ class DwellSelector:
             if cur_d is not None and cur_d <= config.SNAP_PX + config.FOCUS_KEEP_PX:
                 if best is None or best == self.focus or best_d > cur_d - config.FOCUS_SWITCH_PX:
                     best, best_d, best_pos = self.focus, cur_d, cur_pos
-        if best is None:
-            # 視線が外れたら、たまったリングはすぐには消さずに減らす（一瞬の揺れで最初からにならないよう）
+        if best is None or best == current:
+            # 視線が外れた・今の行き先を見ている（何も決定しない）。
+            # たまったリングはすぐには消さずに減らす（一瞬の揺れで最初からにならないよう）
             self.progress = max(0.0, self.progress - dt / config.DWELL_DECAY_SEC)
             if self.progress == 0.0:
                 self.focus, self.focus_pos = None, None
@@ -302,7 +306,7 @@ class DwellSelector:
         if best != self.focus:
             self.focus, self.progress = best, 0.0
         self.focus_pos = best_pos
-        self.progress = min(1.0, self.progress + dt / config.DWELL_SEC)
+        self.progress = min(1.0, self.progress + dt / dwell_sec)
         if self.progress >= 1.0:
             chosen = self.focus
             self.reset()

@@ -111,6 +111,7 @@ class Game:
         self.recalibrating = False
         self.resume_play = False
         self.selected = None
+        self.lock_time = -1e9          # 最後に行き先を決めた時刻（time.monotonic）
         self.last_g = 0.0
         self.hand = None
         self.events = []
@@ -189,6 +190,7 @@ class Game:
         self.robot.reset()
         self.field.reset(self.robot.pos)
         self.selected = None
+        self.lock_time = -1e9
         self.mission = None
         self.popups = []
         self.recalibrating = False
@@ -446,7 +448,15 @@ class Game:
                 p = self.scene.project(GOAL_POS, 0.03, SCENE_RECT)
                 if p is not None:
                     targets.append(("goal", p, self.scene.screen_radius(GOAL_POS, 0.0, config.GOAL_RADIUS, SCENE_RECT)))
-            chosen = self.dwell.update(gaze, targets, dt, exclude=self.selected)
+            # 行き先を決めたあと、まだつかんでいない物から別の物へ乗り換えるには長く見つめる必要がある。
+            # 決めた直後（LOCK_COOLDOWN 秒）は次の選択を受け付けない（視線の揺れで行き先がすぐ変わらないように）
+            switching = m.held is None and isinstance(self.selected, int)
+            dwell_sec = config.SWITCH_DWELL_SEC if switching else config.DWELL_SEC
+            if now - self.lock_time >= config.LOCK_COOLDOWN:
+                chosen = self.dwell.update(gaze, targets, dt, current=self.selected, dwell_sec=dwell_sec)
+            else:
+                chosen = None
+                self.dwell.reset()
             if chosen is not None:
                 self.select(chosen)
             if self.dwell.focus is not None:
@@ -515,6 +525,7 @@ class Game:
             if p is not None:
                 self.gaze.correct(p)
         self.selected = chosen
+        self.lock_time = time.monotonic()
         self.robot.approach(pos)
         self.robot.offset = None
         self.events.append(f"lock:{chosen}")
