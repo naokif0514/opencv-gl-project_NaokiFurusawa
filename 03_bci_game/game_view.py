@@ -374,7 +374,7 @@ class GameView:
 
     def _time_bar(self):
         g = self.g
-        m = g.mission if g.state == "play" else None
+        m = g.mission if g.state in ("play", "stage_clear") else None
         x, y, w, h = CARD_STAGE
         tl = config.STAGE_TIME if m is None else m.time_left
         frac = tl / config.STAGE_TIME
@@ -629,7 +629,7 @@ class GameView:
         g = self.g
         st = g.stage
         m = g.mission
-        in_play = g.state == "play" and m is not None
+        in_play = g.state in ("play", "stage_clear") and m is not None      # クリア画面ではそのステージの結果を出す
 
         # ---- ステージとスコア ----
         x, y, w, h = CARD_STAGE
@@ -680,7 +680,8 @@ class GameView:
         self._jt(img, "開く", "open", x + 120, y + 122, 11, DIM)
         self._jt(img, "握る", "grip", x + w - 20, y + 122, 11, DIM, "right")
         if c.n_alive < c.n_all and in_play and m.degraded and not g.recalibrating:
-            self._jt(img, "電極劣化中：L で再同期", "degraded: L", x + 14, y + 80, 12, (255, 170, 120))
+            if g.state == "play":
+                self._jt(img, "電極劣化中：L で再同期", "degraded: L", x + 14, y + 80, 12, (255, 170, 120))
 
         # ---- 下：操作とカメラの状態 ----
         x, y = BX, H - 50
