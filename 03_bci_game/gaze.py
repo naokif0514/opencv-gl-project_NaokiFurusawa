@@ -22,6 +22,7 @@ gaze.py
       注視点が GAZE_FIX_RADIUS 以内に留まっている間は固視とみなし、表示する点をほぼ止める（ゆっくりだけ追う）。
       その範囲の外に GAZE_FIX_BREAK 秒以上出たらサッカードとみなし、新しい位置へ跳ぶ
       （視線研究で固視とサッカードを分ける「分散のしきい値による方法（I-DT）」の考え方）
+  (d) 表示・選択に使う点は、(c) の点へ時定数 GAZE_GLIDE_SEC で滑らかに近づける（跳ぶときも滑って見える）
 
 ■ 3. ずれの補正（ドリフト補正）
   Web カメラの視線推定は、時間がたつと頭の位置の変化などで全体がずれてくる。
@@ -235,7 +236,12 @@ class GazeTracker:
         self.recent.append((self.time, p.copy()))
         while self.recent and self.time - self.recent[0][0] > config.DWELL_SEC:
             self.recent.popleft()
-        self.point = self.fixation(p, dt)                                # (c) 固視フィルタ
+        fix = self.fixation(p, dt)                                       # (c) 固視フィルタ
+        # (d) 表示・選択に使う点は、固視フィルタの点へ滑らかに近づける（跳んだときも、ぱっと飛ばずに滑る）
+        if self.point is None:
+            self.point = fix.copy()
+        else:
+            self.point = self.point + (fix - self.point) * (1.0 - math.exp(-dt / config.GAZE_GLIDE_SEC))
         return self.point
 
     def correct(self, target):

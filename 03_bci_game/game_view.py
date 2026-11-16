@@ -9,10 +9,11 @@ BCI オペレーターの描画（main.py の Game の状態を読んで描く�
   ・重ねて表示：視線同期、同期フェーズ（同期パッド + 遊び方）、カウントダウン、B キーの「裏側」（脳とラスター）
   ・結果：スコアとハイスコア、プレイ中の脳の活動の振り返り（光った領域、ラスターの一部、デコード精度の推移と劣化の時刻）
 
-■ 解像度
-  画面の配置は 1280×720 の「論理座標」で決めてあり、実際には RENDER_SCALE 倍の解像度のオフスクリーン
-  （render_target.py）に描いてから、ウィンドウ（ディスプレイいっぱい）へ拡大する。
-  文字の画像もオフスクリーンと同じ解像度で描く（論理座標 × k）。
+■ 解像度と文字の読みやすさ
+  画面の配置は 1280×720 の「論理座標」で決めてある。3D・脳・図形は軽さのために RENDER_SCALE 倍の解像度の
+  オフスクリーン（render_target.py）に描いてから、ウィンドウ（ディスプレイいっぱい）へ拡大する。
+  **文字だけは、拡大したあとの実際の画面の解像度で描いて最後に重ねる**（拡大でぼやけないように）。
+  さらに、文字には暗い縁取りをつけ、見出しと数字は太字にし、小さすぎる文字（13 未満）は 13 にそろえる。
   文字（英数字は cv2.putText、日本語は jtext）は 1 枚の透明な画像に 0.1 秒ごと（と画面が切りかわったとき）に描き直す。
 """
 
@@ -56,13 +57,14 @@ class GameView:
     def __init__(self, game):
         self.g = game
         self.rt = RenderTarget(round(W * config.RENDER_SCALE), round(H * config.RENDER_SCALE), config.MSAA_SAMPLES)
-        self.k = self.rt.width / W                 # 論理座標 → オフスクリーンの画素
+        self.kv = self.rt.width / W                # 論理座標 → オフスクリーンの画素（3D・図形）
+        self.k = 1.0                               # 論理座標 → 実際の画面の画素（文字。ウィンドウの大きさで変わる）
         self.batch = Batch2D()
         self.pip_quad = TexturedQuad(gl.GL_LINEAR)
         self.raster_quad = TexturedQuad(gl.GL_NEAREST)
         self.result_raster = TexturedQuad(gl.GL_NEAREST)
         self.overlay = TexturedQuad(gl.GL_LINEAR)
-        self.overlay_img = np.zeros((self.rt.height, self.rt.width, 4), dtype=np.uint8)
+        self.overlay_img = None                    # 文字の画像（実際の画面の解像度。render で用意する）
         self._last_overlay = -1.0
         self._last_state = None
         self._pip_id = -1
@@ -81,7 +83,7 @@ class GameView:
         return x <= p[0] <= x + w and y <= p[1] <= y + h
 
     def _vp(self, x, y, w, h):
-        k = self.k
+        k = self.kv
         return (int(x * k), int((H - y - h) * k), int(w * k), int(h * k))
 
     def _full_viewport(self):
@@ -118,6 +120,19 @@ class GameView:
         else:
             self._render_game(t, dt, gaze)
 
+        gl.glDisable(gl.GL_BLEND)
+        self.rt.present(g.window)              # オフスクリーンをウィンドウいっぱいに拡大
+
+        # ---- 文字：実際の画面の解像度で描いて重ねる ----
+        fb_w, fb_h = glfw.get_framebuffer_size(g.window)
+        x, y, w, h = self.rt.letterbox(fb_w, fb_h)
+        if w <= 0 or h <= 0:
+            glfw.swap_buffers(g.window)
+            return
+        if self.overlay_img is None or self.overlay_img.shape[:2] != (h, w):
+            self.overlay_img = np.zeros((h, w, 4), dtype=np.uint8)
+            self.k = w / W
+            self._last_overlay = -1.0
         if t - self._last_overlay >= config.OVERLAY_INTERVAL or g.state != self._last_state:
             self._last_state = g.state
             self.overlay_img[:] = 0
@@ -129,10 +144,11 @@ class GameView:
                 self._text_game(fps)
             self.overlay.upload(self.overlay_img)
             self._last_overlay = t
-        self._full_viewport()
+        gl.glViewport(x, y, w, h)
+        gl.glEnable(gl.GL_BLEND)
+        gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
         self.overlay.draw(0, 0, W, H)
         gl.glDisable(gl.GL_BLEND)
-        self.rt.present(g.window)
         glfw.swap_buffers(g.window)
 
     # ========================================================
@@ -422,18 +438,24 @@ class GameView:
         cv2.putText(img, text, (int(x * k), int(y * k)), cv2.FONT_HERSHEY_SIMPLEX, scale * k, (*color, 255),
                     max(1, round(thick * k)), cv2.LINE_AA)
 
-    def _jt(self, img, ja, en, x, y, size=18, color=(255, 255, 255), anchor="left"):
-        """日本語が書ければ日本語、書けなければ英語（cv2）。y は文字の上端"""
+    def _jt(self, img, ja, en, x, y, size=18, color=(255, 255, 255), anchor="left", bold=None, outline=True):
+        """
+        日本語が書ければ日本語、書けなければ英語（cv2）。y は文字の上端。
+        読みやすさのため、13 未満の大きさは 13 にし、20 以上は太字、すべてに暗い縁取りをつける
+        """
         if not ja:
             return
         k = self.k
+        size = max(size, 13)
+        bold = size >= 20 if bold is None else bold
         if self.jtext.available:
             px = int(round(size * k))
+            stroke = max(1, round(px / 9)) if outline else 0
             if anchor == "right":
-                w, _ = self.jtext.size(ja, px)
-                self.jtext.draw(img, ja, x * k - w, y * k, px, color)
+                w, _ = self.jtext.size(ja, px, bold, stroke)
+                self.jtext.draw(img, ja, x * k - w, y * k, px, color, bold=bold, stroke=stroke)
             else:
-                self.jtext.draw(img, ja, x * k, y * k, px, color, anchor)
+                self.jtext.draw(img, ja, x * k, y * k, px, color, anchor, bold=bold, stroke=stroke)
         else:
             text = en or ja
             (tw, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, size / 30, 1)
