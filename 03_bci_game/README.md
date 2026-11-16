@@ -129,7 +129,7 @@ cd 03_bci_game
 | 場所 | 内容 |
 |---|---|
 | 中央 | 机の上の 3D の場面（物・カゴ・ロボット・影）。斜め上から見下ろす固定の視点（ロボットを少しだけ追う） |
-| 上の HUD | スコア、集めた数、残り時間（バー）、コンボ（倍率と 4 段階の目盛り）、同期の状態（同期 良好 / 電極劣化 / 再同期中） |
+| 上の HUD | SCORE（スコア）、ITEMS（集めた数）、TIME（残り時間とバー）、COMBO（倍率と 4 段階の目盛り）、NEURAL LINK（同期の状態：LINK STABLE = 同期 良好 / LINK DEGRADED = 電極劣化、L で再同期 / RESYNC = 再同期中） |
 | 右下 | 小さなカメラ映像（手の骨格つき）。手・顔が見えているか（○ / ×） |
 | 3D の上 | 黄色い小さな輪 = グリッパーの先、黄色いリング = 見つめている物（たまると決定）、白い点 = 注視点、「+250」= 得点 |
 | B キー | 右上に脳（光る領域と擬似ニューロン）、その下にラスター（下 = 方向のニューロン、上の白い行 = 把持ニューロン） |
@@ -221,7 +221,8 @@ cd 03_bci_game
 テストモード（カメラなし）の自動プレイでは、描画は約 38〜53 fps でした。
 
 - 3D・図形は決まった解像度のオフスクリーンに描いてから、ディスプレイいっぱいへ拡大する（`render_target.py`）。ウィンドウを大きくしても重くならない
-- **文字は、拡大したあとの実際の画面の解像度で描いて最後に重ねる**ので、3D の解像度を下げてもぼやけない。さらに暗い縁取りと太字で、3D の場面の上でも読みやすくしている
+- **文字は、拡大したあとの実際の画面の解像度で描いて最後に重ねる**ので、3D の解像度を下げてもぼやけない。薄い暗い縁取りで、3D の場面の上でも読みやすくしている
+- **フォント**（`jtext.py`）：機械的・無機質な見た目にするため、役割ごとに分けている。大きな数字・見出しは **Orbitron**（幅広で角ばった SF 風）、ラベル・計器の表示は字間を空けた **Rajdhani**（細身で角ばった形）、日本語の本文は Noto Sans CJK（細め）。1 つの文字列の中で英数字と日本語を分けて、それぞれのフォントで描いてベースラインをそろえる
 - 3D はポリゴン数を少なく（円柱 12 分割、球 80 三角形）、影は楕円を置くだけにしている。プレイ中は脳を描かない（B キーの「裏側」のときだけ描く）
 - **軽量モード**（`--light` または `config.py` の `LIGHT_MODE = True`）：3D を描く解像度 0.75 倍、Face Mesh を 2 フレームに 1 回、手の探索を 4 フレームに 1 回、文字の描き直しを 0.15 秒ごと、色の検出の画像を小さく
 
@@ -264,10 +265,11 @@ cd 03_bci_game
 | `robot.py` | 動く台座 + 2 関節アーム | 新規（アームは robot_arm.py） |
 | `brain_model.py` / `brain_renderer.py` / `brain_test.py` | 標準脳の取得・キャッシュ・簡易モデル・領域、脳とニューロンの描画・変形、テスト画面 | 新規 |
 | `game_log.py` | プレイログの CSV | 02 の session_logger.py の仕組みを流用 |
-| `jtext.py` | 日本語の文字の描画（Pillow + Noto Sans CJK） | 新規 |
+| `jtext.py` | 文字の描画（Pillow。英数字は Orbitron / Rajdhani、日本語は Noto Sans CJK。字間・縁取り） | 新規 |
 | `gfx2d.py` | 2D 図形・テクスチャの描画 | 02 の renderer.py の一部を取り出した |
 | `hand_tracker.py`、`neuron_model.py`、`decoder.py`、`gl_utils.py`、`robot_arm.py` | 手の追跡、ニューロンモデル、デコーダ、OpenGL の共通処理、逆運動学 | 02_pseudo_bci からコピー（各ファイルの先頭に記載） |
 | `config.py` | すべての設定 | 02 の config.py をもとに追加・変更 |
+| `assets/fonts/` | Orbitron・Rajdhani のフォントファイルとライセンス（OFL.txt） | Google Fonts（SIL Open Font License 1.1） |
 | `shaders/` | scene（3D の場面）・brain（脳）は新規、neuron・flat2d・textured は 02 からコピー | |
 
 ### プレイログ
@@ -308,4 +310,7 @@ cd 03_bci_game
   - 出典：Destrieux ら (2010)（上の参考文献）
 - **nilearn**（データの取得に使用）：BSD ライセンス。https://nilearn.github.io/
 - **MediaPipe**（手・顔の検出）：Apache License 2.0
-- **Noto Sans CJK**（日本語の文字。システムのフォントを使用）：SIL Open Font License
+- **Noto Sans CJK**（日本語の文字。システムのフォントを使用）：SIL Open Font License 1.1
+- **Orbitron**（数字・見出し。`assets/fonts/Orbitron-Variable.ttf`）：Copyright 2018 The Orbitron Project Authors（https://github.com/theleagueof/orbitron）。SIL Open Font License 1.1（`assets/fonts/Orbitron-OFL.txt`）。Google Fonts から取得
+- **Rajdhani**（ラベル。`assets/fonts/Rajdhani-Medium.ttf`、`Rajdhani-SemiBold.ttf`）：Copyright (c) 2014, Indian Type Foundry。SIL Open Font License 1.1（`assets/fonts/Rajdhani-OFL.txt`）。Google Fonts から取得
+- フォントファイルがない場合は、Noto Sans CJK で代わりに描く

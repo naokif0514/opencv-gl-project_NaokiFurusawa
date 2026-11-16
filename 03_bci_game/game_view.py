@@ -13,7 +13,10 @@ BCI オペレーターの描画（main.py の Game の状態を読んで描く�
   画面の配置は 1280×720 の「論理座標」で決めてある。3D・脳・図形は軽さのために RENDER_SCALE 倍の解像度の
   オフスクリーン（render_target.py）に描いてから、ウィンドウ（ディスプレイいっぱい）へ拡大する。
   **文字だけは、拡大したあとの実際の画面の解像度で描いて最後に重ねる**（拡大でぼやけないように）。
-  さらに、文字には暗い縁取りをつけ、見出しと数字は太字にし、小さすぎる文字（13 未満）は 13 にそろえる。
+  さらに、文字には薄い暗い縁取りをつけ、小さすぎる文字（13 未満）は 13 にそろえる。
+■ フォント（jtext.py）：機械的・無機質な見た目にするため、役割ごとにフォントを分ける
+  "display" = 大きな数字・見出し（英数字は Orbitron）、"tech" = ラベル・計器（英数字は Rajdhani。字間を空ける）、
+  "jp" = 日本語の本文（Noto Sans CJK、細め）。英字のラベルに小さな日本語を添える
   文字（英数字は cv2.putText、日本語は jtext）は 1 枚の透明な画像に 0.1 秒ごと（と画面が切りかわったとき）に描き直す。
 """
 
@@ -102,8 +105,11 @@ class GameView:
         b.rect(x, y, w, h, (0.045, 0.055, 0.09, alpha))
         b.rect(x, y, w, 2, (*accent, 1.0))
 
-    def _text_w(self, text, size):
-        return self.jtext.size(text, size)[0] if self.jtext.available else len(text) * size * 0.55
+    def _text_w(self, text, size, font="jp", tracking=0.0):
+        """文字の幅（論理座標）"""
+        if not self.jtext.available:
+            return len(text) * size * 0.55
+        return self.jtext.size(text, size, role=font, tracking=int(round(tracking * size)))[0]
 
     # ========================================================
     def render(self, t, dt, gaze, fps):
@@ -176,20 +182,30 @@ class GameView:
     def _text_title(self):
         img = self.overlay_img
         g = self.g
-        self._jt(img, "BCI オペレーター", "BCI OPERATOR", W / 2, 22, 50, (235, 245, 255), "center")
-        self._jt(img, "視線と脳の信号で、ロボットを操作して物を集めよう", "Collect objects with your eyes and brain",
-                 W / 2, 88, 19, ACCENT, "center")
+        self._jt(img, "BCI OPERATOR", "BCI OPERATOR", W / 2, 20, 52, (225, 240, 255), "center", font="display",
+                 bold=True, tracking=0.12)
+        self._jt(img, "BRAIN-COMPUTER INTERFACE  //  HYBRID CONTROL", "", W / 2, 86, 16, ACCENT, "center", font="tech",
+                 tracking=0.25)
+        self._jt(img, "視線と脳の信号でロボットを操作し、物を集める", "", W / 2, 110, 15, DIM, "center")
         if g.state == "title":
-            self._jt(img, "スタート（SPACE / クリック）", "START", W / 2, START_BUTTON[1] + 15, 24, (255, 255, 255),
-                     "center")
-            mode = "テストモード（カメラなし：マウスで操作）" if g.test_mode else "カメラモード：顔と右手をカメラに映す"
-            self._jt(img, mode, mode, W / 2, 536, 16, (255, 200, 110) if g.test_mode else GOOD, "center")
-            keys = ("T：カメラ / テスト　　F11：全画面　　ESC：終了" if g.vision is not None else "F11：全画面　　ESC：終了")
-            self._jt(img, keys, keys, W / 2, 668, 14, DIM, "center")
+            self._jt(img, "START", "START", W / 2, START_BUTTON[1] + 6, 26, (255, 255, 255), "center", font="display",
+                     bold=True, tracking=0.3)
+            self._jt(img, "SPACE / CLICK", "", W / 2, START_BUTTON[1] + 40, 13, ACCENT, "center", font="tech",
+                     tracking=0.3)
+            if g.test_mode:
+                self._jt(img, "TEST MODE  ―  マウスで操作（カメラなし）", "", W / 2, 536, 15, (255, 200, 110), "center",
+                         font="tech", tracking=0.08)
+            else:
+                self._jt(img, "CAMERA MODE  ―  顔と右手をカメラに映す", "", W / 2, 536, 15, GOOD, "center", font="tech",
+                         tracking=0.08)
+            keys = "T  CAMERA / TEST     F11  FULLSCREEN     ESC  QUIT" if g.vision is not None else \
+                "F11  FULLSCREEN     ESC  QUIT"
+            self._jt(img, keys, keys, W / 2, 670, 13, DIM, "center", font="tech", tracking=0.2)
         else:
-            self._jt(img, "脳と接続中…", "LINKING...", W / 2, 560, 30, ACCENT, "center")
+            self._jt(img, "LINKING TO CORTEX", "", W / 2, 556, 26, ACCENT, "center", font="display", tracking=0.18)
+            self._jt(img, "脳と接続中", "", W / 2, 586, 15, DIM, "center")
         if g.model.simplified:
-            self._jt(img, "！" + WARNING_TEXT, "! simplified brain model", W / 2, 120, 16, (255, 210, 120), "center")
+            self._jt(img, "！" + WARNING_TEXT, "! simplified brain model", W / 2, 134, 15, (255, 210, 120), "center")
 
     # ========================================================
     # ゲーム（3D の場面 + 重ねる表示）
@@ -401,34 +417,36 @@ class GameView:
         img = self.overlay_img
         f = self.g.final
         r = f["result"]
-        self._jt(img, "結果", "RESULT", 50, 44, 24, DIM)
-        self._jt(img, f"{r.score}", f"{r.score}", 310, 70, 64, GOLD, "center")
-        self._jt(img, "点", "pts", 430, 112, 22, GOLD)
+        self._label(img, "RESULT", "結果", 50, 46)
+        self._jt(img, f"{r.score}", f"{r.score}", 300, 74, 66, GOLD, "center", font="display", bold=True)
+        self._jt(img, "PTS", "", 430, 120, 18, GOLD, font="tech", tracking=0.2)
         by = "　".join(f"{v['name']} {r.by_type.get(k, 0)}" for k, v in config.ITEM_TYPES.items())
-        self._jt(img, f"集めた数 {r.collected} 個（{by}）", "collected", 310, 168, 17, INK, "center")
-        self._jt(img, f"最高コンボ ×{r.max_combo:.1f}　　失敗 {r.failures} 回", "combo", 310, 196, 17, INK, "center")
+        self._jt(img, f"集めた数 {r.collected}（{by}）", "collected", 310, 170, 16, INK, "center")
+        self._jt(img, f"最高コンボ ×{r.max_combo:.1f}　　失敗 {r.failures}", "combo", 310, 198, 16, INK, "center")
         rank = f["rank"]
-        self._jt(img, "ハイスコア" + (f"（今回 {rank + 1} 位！）" if rank is not None else ""), "HIGH SCORES", 50, 252,
-                 20, GOLD if rank is not None else INK)
-        for i, s in enumerate(f["scores"]):
+        self._label(img, "HIGH SCORES", "ハイスコア" + (f"　今回 {rank + 1} 位" if rank is not None else ""), 50, 254,
+                    GOLD if rank is not None else ACCENT)
+        for i, sc in enumerate(f["scores"]):
             y = 300 + i * 30
             col = GOLD if i == rank else INK
-            self._jt(img, f"{i + 1:2d}.", "", 60, y, 17, col)
-            self._jt(img, f"{s['score']} 点", "", 230, y, 17, col, "right")
-            self._jt(img, f"{s.get('collected', 0)} 個", "", 320, y, 15, DIM if i != rank else col, "right")
-            self._jt(img, s["date"], "", 560, y, 15, DIM if i != rank else col, "right")
-        self._jt(img, "プレイ中の脳の活動", "BRAIN ACTIVITY", 630, 40, 22, (255, 200, 150))
-        self._jt(img, "光った領域（左半球。明るいほど長く使った）", "regions", 630, 76, 13, DIM)
+            sub = col if i == rank else DIM
+            self._jt(img, f"{i + 1:02d}", "", 60, y, 17, sub, font="display")
+            self._jt(img, f"{sc['score']}", "", 250, y, 18, col, "right", font="display")
+            self._jt(img, f"{sc.get('collected', 0)} ITEMS", "", 360, y + 2, 14, sub, "right", font="tech", tracking=0.1)
+            self._jt(img, sc["date"], "", 560, y + 2, 14, sub, "right", font="tech", tracking=0.08)
+        self._label(img, "BRAIN ACTIVITY", "プレイ中の脳の活動", 630, 46, (255, 190, 140))
+        self._jt(img, "光った領域（左半球。明るいほど長く使った）", "regions", 630, 80, 13, DIM)
         for i, name in enumerate(("motor", "somato", "fef", "visual")):
             x = 640 + (i % 2) * 300
             y = 352 + (i // 2) * 26
-            self._jt(img, REGION_JA[name], name, x, y, 15, rgb255(REGION_COLORS[name]))
-            self._jt(img, f"{f['usage'].get(name, 0.0):.0%}", "", x + 290, y, 13, DIM, "right")
-        self._jt(img, "スパイク（最後に物をつかんだときの直前 4 秒。上の白い行は把持ニューロン）", "raster", 660, 408, 13, DIM)
-        self._jt(img, "デコード精度（相関係数）の推移　赤 = 電極劣化　ピンク = 再同期", "accuracy", 660, 508, 13, DIM)
-        self._jt(img, "0 秒", "0", 660, 644, 12, DIM)
-        self._jt(img, f"{config.GAME_TIME:.0f} 秒", "", 1220, 644, 12, DIM, "right")
-        self._jt(img, "SPACE でタイトルへ", "SPACE: title", W / 2, 684, 17, INK, "center")
+            self._jt(img, REGION_JA[name], name, x, y, 14, rgb255(REGION_COLORS[name]))
+            self._jt(img, f"{f['usage'].get(name, 0.0) * 100:3.0f}%", "", x + 290, y, 14, DIM, "right", font="tech")
+        self._label(img, "SPIKES", "最後に物をつかんだ直前の 4 秒（上の白い行 = 把持ニューロン）", 660, 404, DIM, 13)
+        self._label(img, "DECODING ACCURACY", "相関係数の推移　赤 = 電極劣化　ピンク = 再同期", 660, 504, DIM, 13)
+        self._jt(img, "0 S", "0", 660, 646, 13, DIM, font="tech", tracking=0.1)
+        self._jt(img, f"{config.GAME_TIME:.0f} S", "", 1220, 646, 13, DIM, "right", font="tech", tracking=0.1)
+        self._jt(img, "SPACE  ―  RETURN TO TITLE", "SPACE: title", W / 2, 684, 16, INK, "center", font="tech",
+                 tracking=0.2)
 
     # ========================================================
     # 文字
@@ -438,24 +456,23 @@ class GameView:
         cv2.putText(img, text, (int(x * k), int(y * k)), cv2.FONT_HERSHEY_SIMPLEX, scale * k, (*color, 255),
                     max(1, round(thick * k)), cv2.LINE_AA)
 
-    def _jt(self, img, ja, en, x, y, size=18, color=(255, 255, 255), anchor="left", bold=None, outline=True):
+    def _jt(self, img, ja, en, x, y, size=18, color=(255, 255, 255), anchor="left", bold=False, outline=True,
+            font="jp", tracking=0.0):
         """
-        日本語が書ければ日本語、書けなければ英語（cv2）。y は文字の上端。
-        読みやすさのため、13 未満の大きさは 13 にし、20 以上は太字、すべてに暗い縁取りをつける
+        文字を書く（日本語フォントがなければ英語を cv2 で）。y は文字の上端。
+        font：役割（"jp" / "tech" / "display"）、tracking：字間（文字の大きさに対する割合）。
+        読みやすさのため 13 未満の大きさは 13 にし、薄い暗い縁取りをつける
         """
         if not ja:
             return
         k = self.k
         size = max(size, 13)
-        bold = size >= 20 if bold is None else bold
         if self.jtext.available:
             px = int(round(size * k))
-            stroke = max(1, round(px / 9)) if outline else 0
-            if anchor == "right":
-                w, _ = self.jtext.size(ja, px, bold, stroke)
-                self.jtext.draw(img, ja, x * k - w, y * k, px, color, bold=bold, stroke=stroke)
-            else:
-                self.jtext.draw(img, ja, x * k, y * k, px, color, anchor, bold=bold, stroke=stroke)
+            stroke = max(1, round(px / 14)) if outline else 0
+            tr = int(round(tracking * px))
+            self.jtext.draw(img, ja, x * k, y * k, px, color, anchor, bold=bold, stroke=stroke, role=font,
+                            tracking=tr)
         else:
             text = en or ja
             (tw, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, size / 30, 1)
@@ -465,26 +482,39 @@ class GameView:
                 x -= tw
             self._t(img, text, x, y + size * 0.8, size / 30, color)
 
+    def _label(self, img, en, ja, x, y, color=ACCENT, size=15, anchor="left"):
+        """計器のようなラベル：字間を空けた英字（Rajdhani）に、小さな日本語を添える"""
+        self._jt(img, en, en, x, y, size, color, anchor, font="tech", bold=True, tracking=0.22)
+        if ja:
+            w = self._text_w(en, size, "tech", 0.22)
+            jx = x + w + 10 if anchor == "left" else x + 10
+            self._jt(img, ja, "", jx, y + 1, max(13, size - 2), DIM)
+
     def _text_game(self, fps):
         img = self.overlay_img
         g = self.g
         m = g.mission
 
-        # ---- HUD：スコア・残り時間・集めた数・コンボ・同期の状態 ----
+        # ---- HUD：スコア・集めた数・残り時間・コンボ・同期の状態（計器の表示）----
         score = m.result.score if m else 0
-        self._jt(img, "スコア", "SCORE", 24, 8, 13, DIM)
-        self._jt(img, f"{score}", f"{score}", 24, 22, 32, GOLD)
+        self._jt(img, "SCORE", "", 24, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
+        self._jt(img, f"{score:05d}", f"{score}", 24, 22, 30, GOLD, font="display", bold=True, tracking=0.06)
+        self._jt(img, "ITEMS", "", 250, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
+        self._jt(img, f"{m.result.collected if m else 0:02d}", "", 250, 22, 30, INK, font="display", bold=True)
         tl = m.time_left if m else config.GAME_TIME
-        self._jt(img, "残り時間", "TIME", 470, 8, 13, DIM)
-        self._jt(img, f"{tl:3.0f} 秒", f"{tl:3.0f}", 770, 10, 24, BAD if tl < 20 else INK, "right")
-        self._jt(img, "集めた数", "COLLECTED", 250, 8, 13, DIM)
-        self._jt(img, f"{m.result.collected if m else 0} 個", "", 250, 22, 28, INK)
-        self._jt(img, "コンボ", "COMBO", 830, 8, 13, DIM)
-        self._jt(img, f"×{m.combo_mult:.1f}" if m else "×1.0", "", 920, 12, 24,
-                 GOLD if (m and m.combo > 0) else INK)
+        self._jt(img, "TIME", "", 470, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
+        self._jt(img, f"{tl:05.1f}", f"{tl:3.0f}", 770, 10, 24, BAD if tl < 20 else INK, "right", font="display")
+        self._jt(img, "COMBO", "", 830, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
+        self._jt(img, f"x{m.combo_mult:.1f}" if m else "x1.0", "", 925, 12, 24, GOLD if (m and m.combo > 0) else INK,
+                 font="display")
         state, text, col = self._sync_state()
-        self._jt(img, "同期", "SYNC", 1050, 8, 13, DIM if state != "degraded" else (255, 220, 210))
-        self._jt(img, text, text, 1050, 24, 19 if state == "degraded" else 18, col)
+        code = {"good": "LINK  STABLE", "degraded": "LINK  DEGRADED", "resync": "RESYNC", "none": "LINK  OFFLINE"}[state]
+        self._jt(img, "NEURAL LINK", "", 1050, 7, 13, DIM if state != "degraded" else (255, 220, 210), font="tech",
+                 bold=True, tracking=0.25)
+        self._jt(img, code, code, 1050, 22, 18, col, font="tech", bold=True, tracking=0.12)
+        sub = {"good": "同期 良好", "degraded": "L で再同期", "resync": f"残り {g.hand_calib.remaining:3.0f} 秒",
+               "none": "同期前"}[state]
+        self._jt(img, sub, "", 1050, 42, 13, col if state == "degraded" else DIM)
 
         # ---- 得点のポップアップ ----
         now = time.monotonic()
@@ -494,36 +524,42 @@ class GameView:
             if p is not None:
                 a = max(0.0, 1.0 - age / 1.4)
                 c = tuple(int(v * a + 30 * (1 - a)) for v in GOLD)
-                self._jt(img, text, text, p[0], p[1] - 30, 30, c, "center")
+                self._jt(img, text, text, p[0], p[1] - 30, 30, c, "center", font="display", bold=True)
 
         # ---- 視線同期・同期フェーズ・カウントダウン ----
         cx = W / 2
         if g.state == "gaze_calib":
             cal = g.gaze.calib
             n = len(cal.points)
-            self._jt(img, f"視線同期  {min(cal.index + 1, n)} / {n}", "GAZE SYNC", cx, HUD + 24, 28, ACCENT, "center")
+            self._jt(img, f"GAZE SYNC  {min(cal.index + 1, n)}/{n}", "GAZE SYNC", cx, HUD + 22, 26, ACCENT, "center",
+                     font="display", tracking=0.12)
             face = g.vision.get_state().face_detected if g.vision else False
             self._jt(img, "光る点を見つめてください（頭は動かさずに）" if face else "顔が見つかりません：カメラの正面へ",
-                     "look at the dot", cx, HUD + 64, 18, INK if face else BAD, "center")
+                     "look at the dot", cx, HUD + 62, 16, INK if face else BAD, "center")
         if g.hand_calib.active:
             hc = g.hand_calib
-            title = "再同期" if g.recalibrating else "同期フェーズ"
-            self._jt(img, f"{title}　残り {hc.remaining:4.1f} 秒", "HAND SYNC", cx, HUD + 12, 26, MAGENTA, "center")
+            title = "RESYNC" if g.recalibrating else "HAND SYNC"
+            self._jt(img, f"{title}  {hc.remaining:04.1f}", "HAND SYNC", cx, HUD + 10, 26, MAGENTA, "center",
+                     font="display", tracking=0.12)
             if hc.phase == "grip":
-                self._jt(img, "握る！" if hc.grip_cue > 0.5 else "開く！", "GRIP/OPEN", cx, PY + PH + 22, 34,
-                         (255, 255, 255), "center")
+                closed = hc.grip_cue > 0.5
+                self._jt(img, "GRIP" if closed else "OPEN", "GRIP/OPEN", cx, PY + PH + 20, 32, (255, 255, 255),
+                         "center", font="display", bold=True, tracking=0.3)
+                self._jt(img, "握る" if closed else "開く", "", cx, PY + PH + 60, 15, MAGENTA, "center")
             else:
                 self._jt(img, PHASE_JA[hc.phase], hc.phase, cx, PY + PH + 24, 18, INK, "center")
-            self._jt(img, f"記録 {hc.valid_sec:4.1f} 秒（手が映っている間だけ）", "rec", PX + PW, PY - 22, 13, DIM, "right")
+            self._jt(img, f"REC {hc.valid_sec:04.1f} S", "rec", PX + PW - 10, PY + 8, 13, DIM, "right", font="tech",
+                     tracking=0.15)
             if not g.recalibrating:
-                self._jt(img, "遊び方", "HOW TO PLAY", 56, 162, 18, ACCENT)
+                self._label(img, "HOW TO PLAY", "遊び方", 56, 162)
                 for i, s in enumerate(STEPS):
                     self._jt(img, f"{i + 1}. {s}", s, 56, 196 + i * 40, 13, INK)
                 self._jt(img, f"制限時間 {config.GAME_TIME:.0f} 秒。小さい物・遠い物ほど高得点", "", 56, 360, 12, GOLD)
         if g.state == "countdown":
             n = int(math.ceil(config.COUNTDOWN_SEC - g.state_t))
-            self._jt(img, str(n) if n > 0 else "スタート！", "GO", cx, H / 2 - 70, 110, (255, 255, 255), "center")
-            self._jt(img, "物を見つめて選び、手でつかんで、カゴへ運ぼう", "", cx, H / 2 + 70, 20, ACCENT, "center")
+            self._jt(img, str(n) if n > 0 else "GO", "GO", cx, H / 2 - 74, 110, (255, 255, 255), "center",
+                     font="display", bold=True)
+            self._jt(img, "物を見つめて選び、手でつかんで、カゴへ運ぼう", "", cx, H / 2 + 70, 18, ACCENT, "center")
 
         # ---- お知らせ ----
         msg = self._message()
@@ -533,17 +569,18 @@ class GameView:
         # ---- 小さなカメラ映像・裏側の見出し ----
         px, py, pw, ph = config.PIP_RECT
         if g.test_mode:
-            self._jt(img, "テストモード：マウス = 視線・手、クリック = 握る", "TEST MODE", W - 16, H - 26, 13,
-                     (255, 200, 110), "right")
+            self._jt(img, "TEST MODE  ―  マウス = 視線・手、クリック = 握る", "TEST MODE", W - 16, H - 28, 13,
+                     (255, 200, 110), "right", font="tech", tracking=0.05)
         else:
             vs = g.vision.get_state()
-            self._jt(img, f"手 {'○' if vs.hand.detected else '×'}　顔 {'○' if vs.face_detected else '×'}",
-                     "", px + 6, py + 4, 13, GOOD if vs.hand.detected and vs.face_detected else BAD)
+            self._jt(img, f"HAND {'OK' if vs.hand.detected else '--'}   FACE {'OK' if vs.face_detected else '--'}",
+                     "", px + 6, py + 4, 13, GOOD if vs.hand.detected and vs.face_detected else BAD, font="tech",
+                     bold=True, tracking=0.15)
         if g.show_backstage:
             bx, by, bw, bh = config.BRAIN_OVERLAY_RECT
-            self._jt(img, "裏側：左半球の脳（光る点 = 運動野の擬似ニューロン）", "backstage", bx + 8, by + 4, 13,
-                     (255, 200, 150))
+            self._label(img, "BACKSTAGE", "左半球の脳（光る点 = 運動野の擬似ニューロン）", bx + 8, by + 4,
+                        (255, 200, 150), 13)
             rx, ry, rw, rh = config.RASTER_OVERLAY_RECT
-            self._jt(img, f"スパイク（{g.cortex.n_alive}/{g.cortex.n_all} 個が記録中）", "raster", rx + 8, ry + 4, 13,
-                     (255, 200, 150))
-        self._jt(img, f"{fps:4.1f} fps", "", 1272, H - 14 if g.test_mode else py - 18, 11, DIM, "right")
+            self._label(img, "SPIKES", f"{g.cortex.n_alive}/{g.cortex.n_all} 個を記録中", rx + 8, ry + 4,
+                        (255, 200, 150), 13)
+        self._jt(img, f"{fps:4.1f} FPS", "", 1272, HUD + 6, 11, DIM, "right", font="tech", tracking=0.1)
