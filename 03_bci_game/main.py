@@ -16,7 +16,8 @@ BCI オペレーター（ゲーム本体）。実際の BCI 研究の「ハイ�
     cd 03_bci_game
     ../.venv/bin/python main.py            # カメラ（視線 + 手 + 色の物）
     ../.venv/bin/python main.py --test     # カメラなし：マウスの位置 = 視線、マウスの動き = 手
-キー：G 注視点の表示、C 視線同期をやり直す、V 現実の色の物 ⇔ 仮想アイテム、R ロボットを初期位置へ、
+キー：G 注視点の表示、C 視線同期をやり直す、V 現実の色の物 ⇔ 仮想アイテム、
+      P 画面中央の枠に見せた物の色を登録、R ロボットを初期位置へ、
       T テストモード、D デバッグ用カメラ窓、ESC 終了
 """
 
@@ -67,10 +68,15 @@ def screen_to_world(q):
 
 
 def calib_points():
-    """視線同期の 5 点：AR 画面の四隅（少し内側）と中央"""
+    """視線同期の点：AR 画面の四隅（少し内側）と中央の 5 点。GAZE_CALIB_POINTS = 9 なら辺の中点も加える"""
     m = config.GAZE_CALIB_INSET
     xs, ys = (AX + AW * m, AX + AW * (1 - m)), (AY + AH * m, AY + AH * (1 - m))
-    return [(xs[0], ys[0]), (xs[1], ys[0]), (AX + AW / 2, AY + AH / 2), (xs[0], ys[1]), (xs[1], ys[1])]
+    cx, cy = AX + AW / 2, AY + AH / 2
+    pts = [(xs[0], ys[0]), (xs[1], ys[0]), (cx, cy), (xs[0], ys[1]), (xs[1], ys[1])]
+    if config.GAZE_CALIB_POINTS >= 9:
+        pts = [(xs[0], ys[0]), (cx, ys[0]), (xs[1], ys[0]), (xs[0], cy), (cx, cy), (xs[1], cy),
+               (xs[0], ys[1]), (cx, ys[1]), (xs[1], ys[1])]
+    return pts
 
 
 class Game:
@@ -176,6 +182,12 @@ class Game:
         elif key == glfw.KEY_R:
             self.robot.reset()
             self.selected = None
+        elif key == glfw.KEY_P and self.vision is not None and not self.test_mode:
+            # 色の登録：画面中央の枠に見せている物の色を、新しいアイテムの色として追加する（最大 3 色、古いものから上書き）
+            self.n_registered = getattr(self, "n_registered", 0) + 1
+            name = f"color{(self.n_registered - 1) % 3 + 1}"
+            self.vision.register_color(name)
+            self.pending_register = name
         elif key == glfw.KEY_T and self.vision is not None:
             self.test_mode = not self.test_mode
             self.notify("テストモード（マウス）" if self.test_mode else "カメラモード")
@@ -205,7 +217,7 @@ class Game:
             gaze = self.gaze.update(None, dt, mouse=m) if inside else None
             return hand, None, gaze, []
         vs = self.vision.get_state()
-        gaze = self.gaze.update(vs.gaze_feat, dt) if self.gaze.calibrated else None
+        gaze = self.gaze.update(vs.gaze_feat, dt, feat_time=vs.gaze_time) if self.gaze.calibrated else None
         return vs.hand, vs.hand_open, gaze, vs.blobs
 
     def current_items(self, blobs, now, dt):
@@ -231,6 +243,7 @@ class Game:
                 self.state_t += dt
 
                 feat = None if self.test_mode else self.vision.get_state().gaze_feat
+                self.check_color_register()
                 hand, hand_open, gaze, blobs = self.read_inputs(now, dt)
                 items = self.current_items(blobs, now, dt)
 
@@ -256,7 +269,8 @@ class Game:
                         self.gaze.calib.cancel()
                         self.set_state("play")
                     elif self.gaze.calib.step(feat, dt):
-                        self.gaze.filter.reset()
+                        self.gaze.reset_filters()
+                        self.gaze.reset_offset()
                         self.notify(f"視線同期 完了（ずれ 約 {self.gaze.calib.residual:.0f} 画素）")
                         self.set_state("play")
                 elif self.state == "play":
@@ -281,8 +295,32 @@ class Game:
             cv2.destroyAllWindows()
             glfw.terminate()
 
+    def check_color_register(self):
+        """P キーの色の登録の結果を受け取る（登録は vision のスレッドで次のフレームに行われる）"""
+        name = getattr(self, "pending_register", None)
+        if name is None or self.vision is None:
+            return
+        res = getattr(self.vision, "last_register", None)
+        if res is None or res[0] != name:
+            return
+        self.pending_register = None
+        if res[1] is None:
+            self.notify("色を登録できませんでした：中央の枠に色のはっきりした物を入れてください")
+        else:
+            config.ITEM_COLORS[name] = res[1]          # アイテムの表示色にも使う
+            self.use_virtual = False
+            lo, hi = res[1]["hsv"][0][0][0], res[1]["hsv"][-1][1][0]
+            self.notify(f"色を登録しました（{name}、色相 {lo}〜{hi}）")
+
     def select(self, chosen, items):
         """視線で対象が決定されたとき：ロボットの台座をその近くへ移動させる"""
+        if not self.test_mode:      # ずれの補正：ユーザーはこの対象を見ていたとみなす
+            if chosen == "goal":
+                self.gaze.correct(world_to_screen(self.goal.pos))
+            else:
+                it = next((i for i in items if i.id == chosen), None)
+                if it is not None:
+                    self.gaze.correct(world_to_screen(it.pos))
         if chosen == "goal":
             self.selected = "goal"
             self.robot.approach(self.goal.pos)
@@ -332,6 +370,18 @@ class Game:
                 b.line(AX + AW * k / 8, AY, AX + AW * k / 8, AY + AH, 1, (0.12, 0.14, 0.2, 1.0))
             for k in range(1, 6):
                 b.line(AX, AY + AH * k / 6, AX + AW, AY + AH * k / 6, 1, (0.12, 0.14, 0.2, 1.0))
+
+        # ---- 色の登録の枠（カメラモードで現実の色の物を使うとき）----
+        if not self.test_mode and not self.use_virtual:
+            x0, y0, x1, y1 = config.COLOR_REGISTER_BOX
+            p0 = (AX + x0 * AW, AY + y0 * AH)
+            p1 = (AX + x1 * AW, AY + y1 * AH)
+            c = (1.0, 1.0, 1.0, 0.35)
+            for (ax, ay), (bx_, by_) in (((p0[0], p0[1]), (p1[0], p0[1])), ((p1[0], p0[1]), (p1[0], p1[1])),
+                                         ((p1[0], p1[1]), (p0[0], p1[1])), ((p0[0], p1[1]), (p0[0], p0[1]))):
+                for k in range(0, 10, 2):
+                    b.line(ax + (bx_ - ax) * k / 10, ay + (by_ - ay) * k / 10,
+                           ax + (bx_ - ax) * (k + 1) / 10, ay + (by_ - ay) * (k + 1) / 10, 1.5, c)
 
         # ---- 地面の上のもの（ゴール、ロボットの影）----
         gp = world_to_screen(self.goal.pos)
@@ -465,7 +515,8 @@ class Game:
         elif self.state == "gaze_calib":
             cal = self.gaze.calib
             cv2.rectangle(img, (int(cx - 260), int(AY + 18)), (int(cx + 260), int(AY + 92)), (6, 10, 24, 210), -1)
-            self._jt(img, f"視線同期  {min(cal.index + 1, 5)} / 5", f"GAZE SYNC  {min(cal.index + 1, 5)} / 5",
+            npts = len(cal.points)
+            self._jt(img, f"視線同期  {min(cal.index + 1, npts)} / {npts}", f"GAZE SYNC  {min(cal.index + 1, npts)} / {npts}",
                      cx, AY + 24, 28, (130, 220, 255), "center")
             face = self.vision.get_state().face_detected if self.vision else False
             self._jt(img, "光る点を見つめてください（頭は楽に）" if face else "顔が見つかりません：カメラの正面へ",
@@ -523,7 +574,7 @@ class Game:
         T(img, f"robot: {st}   motor drive {self.cortex.motor_drive:.2f}", x, y + 160, 0.45)
         T(img, f"render {fps:4.1f} fps", x, y + 182, 0.42, dim)
         T(img, "look ~1 s at an item / GOAL to move the robot", x, y + 212, 0.42, (220, 225, 235))
-        T(img, "G gaze dot  C gaze sync  V virtual/real items", x, y + 236, 0.4, dim)
+        T(img, "G gaze dot  C gaze sync  V virtual/real  P color", x, y + 236, 0.4, dim)
         T(img, "R reset robot  T test mode  D debug  ESC quit", x, y + 256, 0.4, dim)
 
         rx, ry, rw, rh = config.RASTER_RECT

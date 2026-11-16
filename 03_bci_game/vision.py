@@ -7,11 +7,13 @@ vision.py
   ・手（MediaPipe Hands）：位置・速度（02 の hand_tracker.py と同じ計算）と、手の開き具合（把持に使う）
   ・視線の特徴量（MediaPipe Face Mesh、虹彩つき）：gaze.py で画面上の注視点に変換する
   ・色の物（OpenCV の HSV しきい値）：赤・青などの物の位置と大きさ（items.py でアイテムにする）
+      顔の範囲は検出から外す（唇・肌を赤い物と間違えないように）。
+      P キーで、画面中央の枠に見せた物の色をその場で登録できる（register_color。照明やカメラで色が変わるため）
 
 ■ 軽くするための工夫（ソフトウェア描画の PC で、カメラ処理 20 fps 以上を目標にする）
-  ・Face Mesh は FACE_EVERY_N フレームに 1 回、Hands は HANDS_EVERY_N フレームに 1 回だけ処理する
-    （手が見えていないときの Hands は手のひらの検出が毎回走って重い（約 25 ms）ので、手を優先して毎フレーム、
-      視線はもともと平滑化するので 2 フレームに 1 回、を既定にした）
+  ・Face Mesh は FACE_EVERY_N フレームに 1 回（既定は毎フレーム。視線の安定に必要）
+  ・Hands は、手を追跡できている間は HANDS_EVERY_N フレームに 1 回（既定は毎フレーム。追跡だけなら約 10 ms と軽い）、
+    手を見失っている間は HANDS_SEARCH_EVERY_N フレームに 1 回だけ手を探す（手のひらの検出は約 25 ms と重いため）
   ・色の検出は、縮小した画像（COLOR_DETECT_WIDTH）で行う（約 0.5 ms）
   ・処理はこの別スレッドで行い、描画のフレームレートに影響しないようにする
 """
@@ -41,6 +43,7 @@ class VisionState:
     hand: HandState = field(default_factory=HandState)
     hand_open: float | None = None          # 手の開き具合（0 = 握る、1 = 開く）。手がなければ None
     gaze_feat: np.ndarray | None = None     # 視線の特徴量（gaze.py）。顔がなければ None
+    gaze_time: float = 0.0                  # その特徴量を計算したフレームの時刻
     face_detected: bool = False
     blobs: list = field(default_factory=list)
     fps: float = 0.0                        # カメラ処理のフレームレート
@@ -109,8 +112,13 @@ def hand_openness(lm):
 # ============================================================
 # 色の物の検出
 # ============================================================
-def detect_color_blobs(frame_bgr):
-    """縮小した画像を HSV に変換し、config.ITEM_COLORS の色の範囲に入る塊を探す"""
+def detect_color_blobs(frame_bgr, colors=None, exclude=None, masks_out=None):
+    """
+    縮小した画像を HSV に変換し、colors（既定は config.ITEM_COLORS）の色の範囲に入る塊を探す。
+    exclude：検出から外す矩形 (x0, y0, x1, y1)（正規化座標）。顔の範囲を入れる
+    masks_out：dict を渡すと、色ごとのマスク画像を入れて返す（デバッグ表示用）
+    """
+    colors = config.ITEM_COLORS if colors is None else colors
     small_w = config.COLOR_DETECT_WIDTH
     scale = small_w / frame_bgr.shape[1]
     small = cv2.resize(frame_bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
@@ -118,11 +126,17 @@ def detect_color_blobs(frame_bgr):
     sh, sw = small.shape[:2]
     kernel = np.ones((3, 3), np.uint8)
     blobs = []
-    for name, spec in config.ITEM_COLORS.items():
+    for name, spec in colors.items():
         mask = np.zeros((sh, sw), np.uint8)
         for lo, hi in spec["hsv"]:
             mask |= cv2.inRange(hsv, np.array(lo), np.array(hi))
+        if exclude is not None:
+            x0, y0, x1, y1 = exclude
+            mask[max(0, int(y0 * sh)):int(y1 * sh), max(0, int(x0 * sw)):int(x1 * sw)] = 0
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)      # 物の表面の光の反射でできる小さな穴をふさぐ
+        if masks_out is not None:
+            masks_out[name] = mask
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         found = []
         for c in contours:
@@ -134,6 +148,36 @@ def detect_color_blobs(frame_bgr):
         found.sort(key=lambda b: -b.area)
         blobs += found[:config.COLOR_MAX_PER_COLOR]
     return blobs
+
+
+def sample_color(frame_bgr, box=None):
+    """
+    画像の中央の枠（正規化座標の矩形 box）の色から、その色の HSV の範囲を作る（色の登録）。
+    枠の中で彩度の高い画素だけを使い、色相の中央値 ± COLOR_REGISTER_HUE、彩度・明るさは下側 10% 点から下限を決める
+    """
+    x0, y0, x1, y1 = box or config.COLOR_REGISTER_BOX
+    h, w = frame_bgr.shape[:2]
+    roi = frame_bgr[int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)]
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV).reshape(-1, 3).astype(np.int32)
+    vivid = hsv[(hsv[:, 1] >= 60) & (hsv[:, 2] >= 40)]
+    if len(vivid) < 0.2 * len(hsv):
+        return None                                   # 色のはっきりした物が枠に入っていない
+    # 色相は 0 と 180 がつながっているので、赤のようにまたがる場合に備えて、中央値は円の上で求める
+    ang = vivid[:, 0] * (2 * np.pi / 180)
+    hue = int(round((np.arctan2(np.sin(ang).mean(), np.cos(ang).mean()) % (2 * np.pi)) * 180 / (2 * np.pi))) % 180
+    s_lo = int(max(50, np.percentile(vivid[:, 1], 10) * 0.8))
+    v_lo = int(max(35, np.percentile(vivid[:, 2], 10) * 0.7))
+    dh = config.COLOR_REGISTER_HUE
+    ranges = []
+    lo, hi = hue - dh, hue + dh
+    if lo < 0:
+        ranges += [((0, s_lo, v_lo), (hi, 255, 255)), ((180 + lo, s_lo, v_lo), (180, 255, 255))]
+    elif hi > 180:
+        ranges += [((lo, s_lo, v_lo), (180, 255, 255)), ((0, s_lo, v_lo), (hi - 180, 255, 255))]
+    else:
+        ranges += [((lo, s_lo, v_lo), (hi, 255, 255))]
+    bgr = cv2.cvtColor(np.uint8([[[hue, 220, 230]]]), cv2.COLOR_HSV2BGR)[0, 0]
+    return {"hsv": ranges, "rgb": tuple(float(c) / 255 for c in bgr[::-1]), "draw_bgr": tuple(int(c) for c in bgr)}
 
 
 # ============================================================
@@ -153,6 +197,13 @@ class VisionThread(threading.Thread):
         self.debug_enabled = False
         self.face_enabled = True      # 視線を使わない場面では止めて軽くできる
         self.velocity = VelocityEstimator()
+        self.colors = dict(config.ITEM_COLORS)   # 検出する色（register_color で追加される。差しかえは丸ごと行う）
+        self._register_request = None
+
+    def register_color(self, name):
+        """次のフレームで、画面中央の枠の色を name として登録する（結果は last_register に入る）"""
+        self.last_register = None
+        self._register_request = name
 
     def open(self):
         self.cap = cv2.VideoCapture(self.camera_index)
@@ -200,6 +251,7 @@ class VisionThread(threading.Thread):
         n = 0
         times = {"all": [], "face": [], "hand": []}
         last_seen = -1e9
+        face_box = None
         st = VisionState()
 
         def rate(key, now):
@@ -218,12 +270,13 @@ class VisionThread(threading.Thread):
             now = time.monotonic()
             h, w = frame.shape[:2]
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            st = VisionState(hand=st.hand, hand_open=st.hand_open, gaze_feat=st.gaze_feat,
+            st = VisionState(hand=st.hand, hand_open=st.hand_open, gaze_feat=st.gaze_feat, gaze_time=st.gaze_time,
                              face_detected=st.face_detected, face_fps=st.face_fps, hand_fps=st.hand_fps)
             hand_lm = face_lm = None
 
             # ---- 手（02 と同じ：位置・速度。加えて開き具合）----
-            if n % config.HANDS_EVERY_N == 0:
+            hands_every = config.HANDS_EVERY_N if st.hand.detected else config.HANDS_SEARCH_EVERY_N
+            if n % hands_every == 0:
                 res = hands.process(rgb)
                 pos = None
                 if res.multi_hand_landmarks:
@@ -249,13 +302,28 @@ class VisionThread(threading.Thread):
                 if res.multi_face_landmarks:
                     face_lm = res.multi_face_landmarks[0]
                     st.gaze_feat = gaze_features(face_lm.landmark, w, h)
+                    st.gaze_time = now
                     st.face_detected = st.gaze_feat is not None
+                    xs = [p.x for p in face_lm.landmark]
+                    ys = [p.y for p in face_lm.landmark]
+                    mx, my = (max(xs) - min(xs)) * 0.15, (max(ys) - min(ys)) * 0.15
+                    face_box = (min(xs) - mx, min(ys) - my, max(xs) + mx, max(ys) + my)
                 else:
                     st.gaze_feat, st.face_detected = None, False
+                    face_box = None
                 st.face_fps = rate("face", now)
 
-            # ---- 色の物 ----
-            st.blobs = detect_color_blobs(frame)
+            # ---- 色の物（顔の範囲は除く）----
+            if self._register_request is not None:
+                spec = sample_color(frame)
+                if spec is not None:
+                    colors = dict(self.colors)
+                    colors[self._register_request] = spec
+                    self.colors = colors
+                self.last_register = (self._register_request, spec)
+                self._register_request = None
+            masks = {} if self.debug_enabled else None
+            st.blobs = detect_color_blobs(frame, self.colors, face_box, masks)
             st.fps = rate("all", now)
             n += 1
 
@@ -269,8 +337,21 @@ class VisionThread(threading.Thread):
                         p = face_lm.landmark[idx]
                         cv2.circle(debug, (int(p.x * w), int(p.y * h)), 2, (0, 255, 255), -1)
                 for b in st.blobs:
-                    c = config.ITEM_COLORS[b.color]["draw_bgr"]
+                    c = self.colors[b.color]["draw_bgr"]
                     cv2.circle(debug, (int(b.pos[0] * w), int(b.pos[1] * h)), int(b.radius * w), c, 2)
+                if face_box is not None:
+                    cv2.rectangle(debug, (int(face_box[0] * w), int(face_box[1] * h)),
+                                  (int(face_box[2] * w), int(face_box[3] * h)), (120, 120, 120), 1)
+                x0, y0, x1, y1 = config.COLOR_REGISTER_BOX
+                cv2.rectangle(debug, (int(x0 * w), int(y0 * h)), (int(x1 * w), int(y1 * h)), (255, 255, 255), 1)
+                # 色ごとのマスク（白 = その色と判定された部分）を右下に小さく並べる
+                for k, (name, m) in enumerate(masks.items()):
+                    th = cv2.resize(m, (w // 5, h // 5))
+                    y = h - th.shape[0] - 4
+                    x = w - (k + 1) * (th.shape[1] + 4)
+                    debug[y:y + th.shape[0], x:x + th.shape[1]] = cv2.cvtColor(th, cv2.COLOR_GRAY2BGR)
+                    cv2.putText(debug, name, (x + 2, y + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                                self.colors[name]["draw_bgr"], 1, cv2.LINE_AA)
                 text = (f"camera {st.fps:4.1f} fps  face {st.face_fps:4.1f}  hand {st.hand_fps:4.1f}  "
                         f"open {'-' if st.hand_open is None else f'{st.hand_open:.2f}'}")
                 cv2.putText(debug, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)

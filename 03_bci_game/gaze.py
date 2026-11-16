@@ -12,17 +12,32 @@ gaze.py
       y = b0 + b1 × (虹彩の上下) + b2 × (顔の向きの上下)
   5 点しかないので、軸ごとに 2 つの特徴量だけを使う（多くすると 5 点では決まらず、外れやすい）。
 
-■ 2. 平滑化（OneEuroFilter）
-  Web カメラの視線推定は 1 フレームごとに大きく揺れる。One Euro フィルタ（Casiez ら 2012）は、
-  ゆっくり動くときは強くなめらかにし（揺れを消す）、速く動くときは弱くする（遅れを減らす）。
+■ 2. 安定化（同じ点を見つめているときに、注視点がその点で止まるように）
+  Web カメラの視線推定は 1 フレームごとに大きく揺れる（実測：虹彩の位置の揺れが、画面上で数十画素）。
+  次の 3 段で揺れを抑える。
+  (a) 特徴量の平均：直近 GAZE_FEAT_WINDOW 秒（約 0.3 秒、9 フレームほど）の特徴量を平均してから画面座標に直す
+      （実測で、1 フレームごとの揺れが約 1/5 になる）
+  (b) One Euro フィルタ（Casiez ら 2012）：ゆっくり動くときは強くなめらかにし、速く動くときは弱くする
+  (c) 固視フィルタ（FixationFilter）：人の目は「止まる（固視）」と「跳ぶ（サッカード）」をくり返す。
+      注視点が GAZE_FIX_RADIUS 以内に留まっている間は固視とみなし、表示する点をほぼ止める（ゆっくりだけ追う）。
+      その範囲の外に GAZE_FIX_BREAK 秒以上出たらサッカードとみなし、新しい位置へ跳ぶ
+      （視線研究で固視とサッカードを分ける「分散のしきい値による方法（I-DT）」の考え方）
 
-■ 3. 吸い付き + ドウェル選択（DwellSelector）
-  Web カメラでは精度が低い（数十〜百画素ずれる）前提で、注視点から SNAP_PX 以内で最も近い対象に「吸い付く」。
+■ 3. ずれの補正（ドリフト補正）
+  Web カメラの視線推定は、時間がたつと頭の位置の変化などで全体がずれてくる。
+  ドウェル選択で対象が決まったとき、「ユーザーはその対象を見ていた」とみなし、
+  見つめていた間の注視点と対象の位置の差の一部（GAZE_DRIFT_GAIN）を、以後の注視点の補正（offset）に加える。
+  使えば使うほど、ずれが小さくなる（視線入力の暗黙のキャリブレーション）。
+
+■ 4. 吸い付き + ドウェル選択（DwellSelector）
+  Web カメラでは精度が低い（100 画素ほどずれる）前提で、注視点から SNAP_PX 以内で最も近い対象に「吸い付く」。
+  一度吸い付いたら、別の対象がはっきり近く（FOCUS_SWITCH_PX 以上）ならないかぎり離れない（ヒステリシス）。
   同じ対象を DWELL_SEC 秒（約 1 秒）見つめ続けたら決定する（ドウェル選択。視線入力の基本的な方法で、
   まばたきやクリックなしで選べる）。見つめている間はリングがたまっていく。
 """
 
 import math
+from collections import deque
 
 import numpy as np
 
@@ -133,32 +148,108 @@ class GazeCalibration:
         return np.array([ax @ [1.0, feat[0], feat[2]], ay @ [1.0, feat[1], feat[3]]])
 
 
+class FixationFilter:
+    """固視フィルタ：小さな範囲に留まっている間は点をほぼ止め、範囲の外に一定時間出たら新しい位置へ跳ぶ"""
+
+    def __init__(self, radius=config.GAZE_FIX_RADIUS, break_sec=config.GAZE_FIX_BREAK,
+                 follow_tau=config.GAZE_FIX_FOLLOW):
+        self.radius, self.break_sec, self.follow_tau = radius, break_sec, follow_tau
+        self.reset()
+
+    def reset(self):
+        self.fix = None
+        self.out_t = 0.0
+        self.out_pts = []
+
+    def __call__(self, p, dt):
+        p = np.asarray(p, dtype=np.float64)
+        if self.fix is None:
+            self.fix = p.copy()
+            return self.fix
+        if np.linalg.norm(p - self.fix) <= self.radius:
+            self.out_t, self.out_pts = 0.0, []
+            self.fix += (p - self.fix) * (1.0 - math.exp(-dt / self.follow_tau))   # 範囲内ではゆっくり追う
+        else:
+            self.out_t += dt
+            self.out_pts.append(p)
+            if self.out_t >= self.break_sec:                  # サッカード：外に出ていた間の平均の位置へ跳ぶ
+                self.fix = np.mean(self.out_pts, axis=0)
+                self.out_t, self.out_pts = 0.0, []
+        return self.fix
+
+
 class GazeTracker:
-    """特徴量 → 画面上の注視点（キャリブレーション + 平滑化）。テストモードではマウスの位置をそのまま使う"""
+    """
+    特徴量 → 画面上の注視点（平均 → キャリブレーションの 1 次式 → ずれの補正 → One Euro → 固視フィルタ）。
+    テストモードではマウスの位置をそのまま使う
+    """
 
     def __init__(self, calib_points):
         self.calib = GazeCalibration(calib_points)
         self.filter = OneEuroFilter()
-        self.point = None           # 平滑化した注視点（画素）。分からなければ None
-        self.raw = None
+        self.fixation = FixationFilter()
+        self.feats = deque()        # (時刻, 特徴量)：平均をとるための直近の特徴量
+        self.offset = np.zeros(2)   # ずれの補正（ドリフト補正）[画素]
+        self.recent = deque()       # (時刻, 補正後・固視フィルタ前の注視点)：ずれの補正に使う
+        self.point = None           # 表示・選択に使う注視点（画素）。分からなければ None
+        self.raw = None             # 1 次式で直しただけの点（平均・平滑化の前）
+        self.time = 0.0
 
     @property
     def calibrated(self):
         return self.calib.model is not None
 
-    def update(self, feat, dt, mouse=None):
+    def reset_filters(self):
+        self.filter.reset()
+        self.fixation.reset()
+        self.feats.clear()
+        self.recent.clear()
+
+    def reset_offset(self):
+        self.offset = np.zeros(2)
+
+    def update(self, feat, dt, mouse=None, feat_time=None):
+        """
+        feat_time：その特徴量を計算したカメラのフレームの時刻。同じフレームを何度も数えないために使う
+        （描画はカメラより速く回るので、同じ特徴量が何回も渡される）
+        """
+        self.time += dt
         if mouse is not None:                       # テストモード：マウスの位置 = 視線
             self.raw = np.asarray(mouse, dtype=np.float64)
             self.point = self.raw.copy()
             return self.point
-        self.raw = self.calib.predict(feat)
-        if self.raw is None:
+        if feat is None or not self.calibrated:
             self.point = None
-            self.filter.reset()
+            self.reset_filters()
             return None
+        t = feat_time if feat_time is not None else self.time
+        if not self.feats or self.feats[-1][0] != t:
+            self.feats.append((t, np.asarray(feat, dtype=np.float64)))
+        while self.feats and t - self.feats[0][0] > config.GAZE_FEAT_WINDOW:
+            self.feats.popleft()
+        mean_feat = np.mean([f for _, f in self.feats], axis=0)          # (a) 特徴量の平均
+        self.raw = self.calib.predict(feat)
+        p = self.calib.predict(mean_feat) + self.offset
         lo, hi = np.array(config.GAZE_CLAMP[:2]), np.array(config.GAZE_CLAMP[2:])
-        self.point = np.clip(self.filter(self.raw, dt), lo, hi)
+        p = np.clip(self.filter(p, dt), lo, hi)                          # (b) One Euro フィルタ
+        self.recent.append((self.time, p.copy()))
+        while self.recent and self.time - self.recent[0][0] > config.DWELL_SEC:
+            self.recent.popleft()
+        self.point = self.fixation(p, dt)                                # (c) 固視フィルタ
         return self.point
+
+    def correct(self, target):
+        """
+        ドリフト補正：対象が選ばれたとき、見つめていた間（直近 DWELL_SEC 秒）の注視点の平均と
+        対象の位置の差の一部を、以後の補正に加える
+        """
+        if not self.recent:
+            return
+        mean = np.mean([p for _, p in self.recent], axis=0)
+        err = np.asarray(target, dtype=np.float64) - mean
+        self.offset = np.clip(self.offset + config.GAZE_DRIFT_GAIN * err, -config.GAZE_DRIFT_MAX,
+                              config.GAZE_DRIFT_MAX)
+        self.fixation.reset()
 
 
 class DwellSelector:
@@ -180,14 +271,22 @@ class DwellSelector:
         決定したらその id を返す（それ以外は None）。
         exclude：今選ばれている対象の id（見続けても、同じ対象を何度も選び直さないように除く）
         """
-        best, best_d = None, None
+        best, best_d, best_pos = None, None, None
+        cur_d, cur_pos = None, None
         if gaze is not None:
             for tid, pos, radius in targets:
                 if tid == exclude:
                     continue
                 d = np.linalg.norm(np.asarray(pos) - gaze) - radius
+                if tid == self.focus:
+                    cur_d, cur_pos = d, pos
                 if d <= config.SNAP_PX and (best_d is None or d < best_d):
                     best, best_d, best_pos = tid, d, pos
+            # ヒステリシス：吸い付いている対象は、少し離れても（SNAP_PX + FOCUS_KEEP_PX まで）、
+            # 別の対象がはっきり近く（FOCUS_SWITCH_PX 以上）ならないかぎり離さない
+            if cur_d is not None and cur_d <= config.SNAP_PX + config.FOCUS_KEEP_PX:
+                if best is None or best == self.focus or best_d > cur_d - config.FOCUS_SWITCH_PX:
+                    best, best_d, best_pos = self.focus, cur_d, cur_pos
         if best is None:
             # 視線が外れたら、たまったリングはすぐには消さずに減らす（一瞬の揺れで最初からにならないよう）
             self.progress = max(0.0, self.progress - dt / config.DWELL_DECAY_SEC)
