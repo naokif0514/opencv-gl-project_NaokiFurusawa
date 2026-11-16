@@ -1,7 +1,8 @@
 """
 game_log.py
 -----------
-プレイログ。描画の 1 フレームごとに 1 行（時刻、状態、注視点、本当の手の速度、デコード結果、把持、イベント）を記録し、
+プレイログ。描画の 1 フレームごとに 1 行（時刻、状態、注視点、本当の手の速度、デコード結果、把持、
+集めた数・スコアとその変化・コンボ、イベント）を記録し、
 終了時に logs/game_YYYYmmdd_HHMMSS.csv に保存する（02_pseudo_bci/session_logger.py と同じ仕組み）。
 """
 
@@ -11,10 +12,11 @@ from datetime import datetime
 
 import config
 
-COLUMNS = ["time_sec", "state", "stage", "mode", "gaze_x", "gaze_y", "dwell_target", "dwell_progress",
+COLUMNS = ["time_sec", "state", "mode", "gaze_x", "gaze_y", "dwell_target", "dwell_progress",
            "hand_detected", "true_vx", "true_vy", "decoded_vx", "decoded_vy", "decoder",
-           "true_grip", "decoded_grip", "gripper_closed", "holding", "robot_x", "robot_y",
-           "n_alive", "n_neurons", "score", "time_left", "event"]
+           "true_grip", "decoded_grip", "gripper_closed", "holding", "holding_type", "robot_x", "robot_y",
+           "n_alive", "n_neurons", "degrade_count", "collected", "score", "score_delta", "combo", "time_left",
+           "event"]
 
 
 class GameLogger:

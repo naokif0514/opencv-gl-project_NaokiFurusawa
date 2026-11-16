@@ -1,20 +1,17 @@
 """
 items.py
 --------
-ゲーム内のアイテム（つかんで運ぶ物）とゴール。
+現実の色の物（赤・青、P キーで登録した色）を、カメラの映像の中で追いかける。
+ゲームでは、現実の物を一定時間カメラに見せると、3D の世界にボーナスアイテムが降ってくる（main.py / field.py）。
 
-■ 現実の物をアイテムにする（RealItemTracker）
-  vision.py が見つけた色の塊（赤・青など）を、フレームをまたいで同じ物として追いかける。
-    ・前のフレームのアイテムのうち、同じ色で最も近いもの（MATCH_DIST 以内）を同じ物とみなす
-    ・位置はなめらかにする（ITEM_SMOOTH_SEC）。現実の物を動かすと、ゲーム内のアイテムも追従する
+■ RealItemTracker
+  vision.py が見つけた色の塊を、フレームをまたいで同じ物として追いかける。
+    ・前のフレームの物のうち、同じ色で最も近いもの（MATCH_DIST 以内）を同じ物とみなす
+    ・位置はなめらかにする（ITEM_SMOOTH_SEC）
     ・一瞬見えなくなっても ITEM_LOST_SEC 秒は残す（手で隠れたときなど）
-  画面には、カメラに写っている現実の物の上に、色の枠と名前を重ねて表示する（AR）。
+    ・first_seen：最初に見えた時刻（BONUS_SHOW_SEC 秒続けて見えたらボーナスを降らせるのに使う）
 
-■ 仮想アイテム（VirtualItems）
-  色の物が手元にないとき用。AR 画面の上に 3D の立方体として表示する（V キーで切り替え）。
-
-座標：AR 画面の幅を 1 とした「ワールド座標」（x 右、y 上、高さ WORLD_H）。
-カメラ画像の正規化座標 (u, v)（v は下向き）からは、x = u × WORLD_W、y = (1 − v) × WORLD_H。
+座標：カメラ画像の正規化座標 (u, v)（0〜1、v は下向き）をそのまま使う。
 """
 
 import itertools
@@ -30,31 +27,14 @@ _ids = itertools.count(1)
 
 
 @dataclass
-class Item:
+class RealItem:
     id: int
-    kind: str                  # "real"（カメラに写った色の物）/ "virtual"（仮想アイテム）
     color: str                 # config.ITEM_COLORS の名前
-    pos: np.ndarray            # ワールド座標
-    radius: float              # ワールド座標での半径
-    last_seen: float = 0.0
-    held: bool = False         # ロボットがつかんでいるか
-    angle: float = 0.0         # 仮想アイテムの向き（見た目用）
-    delivered: bool = False    # ゴールに置かれた（もう選べない）
-    scanned: bool = False      # 現実の物をスキャンして作ったデジタルの荷物か
-
-    @property
-    def rgb(self):
-        return config.ITEM_COLORS[self.color]["rgb"]
-
-
-@dataclass
-class Goal:
-    pos: np.ndarray
+    pos: np.ndarray            # カメラ画像の正規化座標
     radius: float
-
-
-def cam_to_world(uv):
-    return np.array([uv[0] * config.WORLD_W, (1.0 - uv[1]) * config.WORLD_H])
+    first_seen: float = 0.0
+    last_seen: float = 0.0
+    used: bool = False         # この物でボーナスを降らせたか（同じ物を見せ続けても 1 回だけ）
 
 
 class RealItemTracker:
@@ -65,36 +45,15 @@ class RealItemTracker:
         k = 1.0 - math.exp(-dt / config.ITEM_SMOOTH_SEC) if dt > 0 else 1.0
         unused = list(self.items)
         for b in blobs:
-            p = cam_to_world(b.pos)
-            r = b.radius * config.WORLD_W
             cand = [it for it in unused if it.color == b.color]
-            best = min(cand, key=lambda it: np.linalg.norm(it.pos - p), default=None)
-            if best is not None and np.linalg.norm(best.pos - p) < MATCH_DIST:
-                best.pos += (p - best.pos) * k
-                best.radius += (r - best.radius) * k
+            best = min(cand, key=lambda it: np.linalg.norm(it.pos - b.pos), default=None)
+            if best is not None and np.linalg.norm(best.pos - b.pos) < MATCH_DIST:
+                best.pos += (b.pos - best.pos) * k
+                best.radius += (b.radius - best.radius) * k
                 best.last_seen = now
                 unused.remove(best)
             else:
-                self.items.append(Item(next(_ids), "real", b.color, p, r, last_seen=now))
+                self.items.append(RealItem(next(_ids), b.color, np.array(b.pos, dtype=np.float64), b.radius,
+                                           first_seen=now, last_seen=now))
         self.items = [it for it in self.items if now - it.last_seen <= config.ITEM_LOST_SEC]
-        return self.items
-
-
-class VirtualItems:
-    def __init__(self, rng):
-        self.rng = rng
-        self.items = []
-
-    def spawn(self, n=config.VIRTUAL_ITEMS, avoid=()):
-        """AR 画面の上半分あたりに、互いに・avoid の点から離して n 個置く"""
-        self.items = []
-        colors = list(config.ITEM_COLORS)
-        for i in range(n):
-            for _ in range(200):
-                p = np.array([self.rng.uniform(0.12, 0.88), self.rng.uniform(0.32, 0.65)])
-                others = [it.pos for it in self.items] + [np.asarray(a) for a in avoid]
-                if all(np.linalg.norm(p - q) > 0.18 for q in others):
-                    break
-            self.items.append(Item(next(_ids), "virtual", colors[i % len(colors)], p, 0.035,
-                                   angle=self.rng.uniform(0, math.pi / 2)))
         return self.items

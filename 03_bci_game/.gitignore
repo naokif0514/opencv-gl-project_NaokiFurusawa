@@ -2,3 +2,5 @@
 assets/nilearn_data/
 assets/brain_fsaverage5.npz
 logs/*.csv
+# ハイスコア（遊んだ人ごとの記録）
+saves/

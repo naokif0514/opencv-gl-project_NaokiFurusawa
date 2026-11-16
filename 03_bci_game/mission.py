@@ -1,31 +1,27 @@
 """
 mission.py
 ----------
-ステージ（難易度）とミッション（アイテムをつかんでゴールに置く）の進行、スコア。
+ゲームのルール（1 ステージ制）：制限時間内に、机の上の物をどれだけ集められるか。
 
-■ 1 回のミッションの流れ
-  1. アイテムを見つめてロックオン → ロボットが近くへ移動（視線：前頭眼野・視覚野）
+■ 1 個を集める流れ
+  1. 物を見つめてロックオン → ロボットが近くへ移動（視線）
   2. 手を動かしてアームを伸ばし（運動野の発火 → 速度のデコード）、手を握ってつかむ（把持ニューロン → 把持のデコード）
-  3. ゴールを見つめてロボットを移動させ、手を開いて置く
-  4. ゴールの中に置けたら成功。ゴールからの距離が近いほど高得点。
-     何もないところで握る（つかみ損ね）・ゴールの外で放す（落とす）と失敗 1 回
+  3. カゴを見つめてロボットを移動させ、手を開いてカゴに置く → 得点
+  一度に運べるのは 1 個。何もないところで握る（つかみ損ね）・カゴの外で放す（床に落ちて残る）と失敗。
 
-■ スコア
-  置けたとき     : DELIVERY_SCORE + ACCURACY_SCORE × (1 − ゴールの中心からの距離 / ゴールの半径)
-  失敗 1 回ごと   : − FAIL_PENALTY
-  ステージクリア : 残り時間 × TIME_SCORE（秒あたり）
+■ 得点
+  基本点（物の種類。小さい物ほど高い）× 距離の倍率（つかんだ位置がカゴから遠いほど高い、DISTANCE_BONUS）
+  × コンボの倍率（COMBO_LEVELS。成功で 1 段階上がり、失敗で 1 段階だけ下がる）
 
-■ 電極劣化イベント（ステージ 3）
-  方向のニューロンの 25%、把持ニューロンの 5% が脱落する。デコーダはそれを知らないので、推定速度に一定の向きの
-  かたよりが乗り、アームが一方へ流される。模擬プレイヤーで調べると（8 秒以内につかめた割合）、
-    再同期しない：6/12（流される向きと逆へ手を動かして補えば、なんとかつかめる）
-    再同期する  ：12/12（約 0.7 秒でつかめる）
-  だったので、この割合にした（把持ニューロンも同じ割合で脱落させると、握っても「握った」のしきい値に届かず、
-  再同期しないとまったく遊べなくなる）。再同期（約 21 秒）は制限時間を使うので、するかどうかをプレイヤーが判断する。
+■ 電極劣化イベント
+  ランダムな時刻（DEGRADE_WINDOW の範囲）に 1〜2 回（DEGRADE_COUNT）、2 回なら DEGRADE_MIN_GAP 秒以上空けて起きる。
+  方向のニューロンの DEGRADE_FRACTION、把持ニューロンの DEGRADE_GRIP_FRACTION が脱落する。デコーダはそれを知らないので、
+  推定速度にかたよりが乗り、アームが一方へ流される。L で再同期すると時間は使うが精度が戻る。
+  （把持ニューロンを同じ割合で脱落させると、握っても「握った」のしきい値に届かず、再同期しないと
+    まったく遊べなくなるので少なめにしている）
 
-■ 現実の物（色の物）のとき
-  現実の物は動かせないので、つかんだときに「スキャン」してデジタルの荷物（同じ色の立方体）を作り、それを運ぶ。
-  スキャンした物は、その場所から動かすまでは、もう一度は選べない。
+■ ボーナス
+  現実の色の物を見せると降ってくる。1 回降ったら BONUS_COOLDOWN 秒は降らない。1 ゲームで BONUS_MAX 回まで。
 """
 
 import math
@@ -34,34 +30,6 @@ from dataclasses import dataclass, field
 import numpy as np
 
 import config
-from items import Item, _ids
-
-
-@dataclass
-class StageDef:
-    number: int
-    title_ja: str
-    title_en: str
-    note_ja: str
-    n_neurons: int
-    noise: float
-    noise_type: str
-    goal_radius: float
-    degrade_at: float | None = None      # プレイ開始から何秒後に電極劣化イベントを起こすか
-    degrade_fraction: float = 0.0
-
-
-STAGES = [
-    StageDef(1, "ステージ 1：接続テスト", "STAGE 1: link test",
-             "ニューロン 200 個・ノイズ少なめ。まずは操作に慣れよう", 200, 5.0, "drift", 0.075),
-    StageDef(2, "ステージ 2：信号が弱い", "STAGE 2: weak signal",
-             "記録できるニューロンが 60 個に減った。デコードが揺れる", 60, 5.0, "drift", 0.075),
-    StageDef(3, "ステージ 3：電極劣化", "STAGE 3: electrode failure",
-             "プレイ中に電極が劣化してニューロンが脱落する。再同期（L）するかは自分で判断", 150, 5.0, "drift",
-             0.075, degrade_at=config.DEGRADE_AT_SEC, degrade_fraction=config.DEGRADE_FRACTION),
-    StageDef(4, "ステージ 4：精密作業", "STAGE 4: precision",
-             "ノイズが強い中で、小さなゴールに正確に置く", 150, 25.0, "both", 0.04),
-]
 
 
 class GripSwitch:
@@ -86,107 +54,127 @@ class GripSwitch:
         return None
 
 
+def gripper_tip(robot):
+    """グリッパーの先（手首の少し先）"""
+    pose = robot.pose
+    a = pose.theta1 + pose.theta2
+    return pose.hand + 0.022 * np.array([math.cos(a), math.sin(a)])
+
+
+def degrade_schedule(rng):
+    """電極劣化の時刻（プレイ開始からの秒）。2 回なら DEGRADE_MIN_GAP 秒以上空ける"""
+    lo, hi = config.DEGRADE_WINDOW
+    n = int(rng.integers(config.DEGRADE_COUNT[0], config.DEGRADE_COUNT[1] + 1))
+    for _ in range(200):
+        ts = np.sort(rng.uniform(lo, hi, n))
+        if n < 2 or np.min(np.diff(ts)) >= config.DEGRADE_MIN_GAP:
+            return [float(t) for t in ts]
+    return [float(lo + i * config.DEGRADE_MIN_GAP) for i in range(n)]
+
+
 @dataclass
-class StageResult:
-    stage: int
+class GameResult:
     score: int = 0
-    delivered: int = 0
+    collected: int = 0
     failures: int = 0
-    time_left: float = 0.0
-    cleared: bool = False
-    accuracy: list = field(default_factory=list)     # (プレイ時間, 相関, RMSE)：デコード精度の推移
-    events: list = field(default_factory=list)
+    max_combo: float = 1.0
+    by_type: dict = field(default_factory=dict)
+    events: list = field(default_factory=list)       # (プレイ時間, 文字列)
 
 
 class Mission:
-    def __init__(self, stage: StageDef):
-        self.stage = stage
-        self.result = StageResult(stage.number)
-        self.time_left = config.STAGE_TIME
+    def __init__(self, rng):
+        self.rng = rng
+        self.result = GameResult()
+        self.time_left = config.GAME_TIME
         self.play_time = 0.0
-        self.held = None                 # つかんでいる荷物（Item）
-        self.scanned = []                # スキャン済みの現実の物の位置
-        self.degraded = False
-        self.last_event = ""
+        self.held = None                  # つかんでいる物（FieldItem）
+        self.combo = 0                    # COMBO_LEVELS の段階
+        self.degrade_times = degrade_schedule(rng)
+        self.degrade_count = 0
+        self.bonus_count = 0
+        self.last_bonus = -1e9
+        self.last_score_delta = 0
 
     @property
     def done(self):
-        return self.result.delivered >= config.ITEMS_PER_STAGE or self.time_left <= 0
+        return self.time_left <= 0
+
+    @property
+    def combo_mult(self):
+        return config.COMBO_LEVELS[self.combo]
 
     def log(self, text):
-        self.last_event = text
         self.result.events.append((round(self.play_time, 2), text))
 
     def tick(self, dt):
         self.play_time += dt
         self.time_left = max(0.0, self.time_left - dt)
 
-    def selectable(self, item):
-        """視線で選べるアイテムか（つかんでいる物・スキャン済みの現実の物は選べない）"""
-        if item.delivered or (self.held is not None and item.id == self.held.id):
-            return False
-        if item.kind == "real":
-            return all(np.linalg.norm(item.pos - p) > config.SCAN_RADIUS for p in self.scanned)
-        return True
+    def degrade_due(self):
+        """電極劣化の時刻になったら True（1 回につき 1 度だけ）"""
+        if self.degrade_count < len(self.degrade_times) and self.play_time >= self.degrade_times[self.degrade_count]:
+            self.degrade_count += 1
+            return True
+        return False
+
+    def bonus_allowed(self):
+        return (self.bonus_count < config.BONUS_MAX
+                and self.play_time - self.last_bonus >= config.BONUS_COOLDOWN)
+
+    def on_bonus(self):
+        self.bonus_count += 1
+        self.last_bonus = self.play_time
+        self.log("bonus_drop")
 
     # --------------------------------------------------------
+    def _fail(self, what):
+        self.result.failures += 1
+        self.combo = max(0, self.combo - 1)          # 失敗したらコンボを 1 段階だけ下げる
+        self.log(what)
+
     def on_close(self, tip, items):
-        """グリッパーを閉じたとき：先端の近くにアイテムがあればつかむ。なければつかみ損ね"""
+        """グリッパーを閉じたとき：先端の近くに物があればつかむ。なければつかみ損ね"""
         if self.held is not None:
             return None
-        cand = [it for it in items if self.selectable(it)]
+        cand = [it for it in items if it.landed]
         best = min(cand, key=lambda it: np.linalg.norm(it.pos - tip), default=None)
         if best is None or np.linalg.norm(best.pos - tip) > best.radius + config.GRAB_MARGIN:
-            self.result.failures += 1
-            self.result.score -= config.FAIL_PENALTY
-            self.log("grasp_miss")
+            self._fail("grasp_miss")
             return "miss"
-        if best.kind == "real":
-            # 現実の物はスキャンして、同じ色のデジタルの荷物を作る
-            self.scanned.append(best.pos.copy())
-            best = Item(next(_ids), "virtual", best.color, tip.copy(), 0.03, angle=0.3)
-            best.scanned = True
-            items_add = best
-        else:
-            items_add = None
         best.held = True
+        best.pickup_pos = best.pos.copy()
         self.held = best
-        self.log(f"grasp_ok:{best.color}")
-        return ("grab", items_add)
+        self.log(f"grasp_ok:{best.type}")
+        return best
 
-    def on_open(self, tip, goal):
-        """グリッパーを開いたとき：ゴールの中なら成功、外なら落とす（失敗）"""
+    def points_for(self, item):
+        """この物をカゴに入れたときの点数：基本点 × 距離の倍率 × コンボの倍率"""
+        d = float(np.linalg.norm(item.pickup_pos - np.asarray(config.GOAL_POS)))
+        dmax = float(np.hypot(config.WORLD_W, config.WORLD_H))
+        lo, hi = config.DISTANCE_BONUS
+        dist_mult = lo + (hi - lo) * min(1.0, d / (0.8 * dmax))
+        return int(round(item.spec["points"] * dist_mult * self.combo_mult)), dist_mult
+
+    def on_open(self, tip):
+        """グリッパーを開いたとき：カゴの中なら得点、外なら床に落ちて残る（失敗）"""
         if self.held is None:
             return None
         it = self.held
         it.held = False
         it.pos = tip.copy()
+        it.height = 0.08                 # 少し上から床に落ちる
         self.held = None
-        d = float(np.linalg.norm(tip - goal.pos))
-        if d <= goal.radius:
-            acc = max(0.0, 1.0 - d / goal.radius)
-            pts = int(config.DELIVERY_SCORE + config.ACCURACY_SCORE * acc)
+        d = float(np.linalg.norm(tip - np.asarray(config.GOAL_POS)))
+        if d <= config.GOAL_RADIUS:
+            pts, dist_mult = self.points_for(it)
             self.result.score += pts
-            self.result.delivered += 1
-            it.delivered = True
-            self.log(f"deliver_ok:dist={d:.3f}:+{pts}")
-            return ("deliver", it, pts, d)
-        self.result.failures += 1
-        self.result.score -= config.FAIL_PENALTY
-        self.log(f"drop:dist={d:.3f}")
-        return ("drop", it, 0, d)
-
-    def finish(self):
-        r = self.result
-        r.time_left = self.time_left
-        r.cleared = r.delivered >= config.ITEMS_PER_STAGE
-        if r.cleared:
-            r.score += int(self.time_left * config.TIME_SCORE)
-        return r
-
-
-def gripper_tip(robot):
-    """グリッパーの先（手首の少し先）"""
-    pose = robot.pose
-    a = pose.theta1 + pose.theta2
-    return pose.hand + 0.022 * np.array([math.cos(a), math.sin(a)])
+            self.result.collected += 1
+            self.result.by_type[it.type] = self.result.by_type.get(it.type, 0) + 1
+            self.last_score_delta = pts
+            self.log(f"deliver_ok:{it.type}:+{pts}:dist_x{dist_mult:.2f}:combo_x{self.combo_mult:.1f}")
+            self.combo = min(len(config.COMBO_LEVELS) - 1, self.combo + 1)
+            self.result.max_combo = max(self.result.max_combo, self.combo_mult)
+            return ("deliver", it, pts)
+        self._fail(f"drop:{it.type}")
+        return ("drop", it, 0)

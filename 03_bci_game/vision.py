@@ -3,7 +3,7 @@ vision.py
 ---------
 1 台の Web カメラから、ゲームに必要な情報をまとめて取り出す処理スレッド（OpenCV + MediaPipe）。
 
-  ・AR の背景：左右反転したカメラ映像（RGBA）
+  ・画面の隅の小さなカメラ映像：左右反転して縮小し、手の骨格を描いたもの（RGBA、PIP_SIZE）
   ・手（MediaPipe Hands）：位置・速度（02 の hand_tracker.py と同じ計算）と、手の開き具合（把持に使う）
   ・視線の特徴量（MediaPipe Face Mesh、虹彩つき）：gaze.py で画面上の注視点に変換する
   ・色の物（OpenCV の HSV しきい値）：赤・青などの物の位置と大きさ（items.py でアイテムにする）
@@ -192,7 +192,8 @@ class VisionThread(threading.Thread):
         self.cap = None
         self._lock = threading.Lock()
         self._state = VisionState()
-        self._frame = None            # AR 用の最新のカメラ画像（RGBA）
+        self._frame = None            # 最新のカメラ画像（RGBA。今は使っていない）
+        self._pip = None              # 画面の隅に出す小さなカメラ映像（RGBA、手の骨格つき）
         self._frame_id = 0
         self._debug = None
         self._running = False
@@ -236,6 +237,11 @@ class VisionThread(threading.Thread):
         """(フレーム番号, RGBA 画像)。番号が変わっていなければテクスチャを送り直さなくてよい"""
         with self._lock:
             return self._frame_id, self._frame
+
+    def get_pip(self):
+        """(フレーム番号, 小さなカメラ映像 RGBA)。画面の隅に表示する（手の骨格つき）"""
+        with self._lock:
+            return self._frame_id, self._pip
 
     def pop_debug_frame(self):
         with self._lock:
@@ -359,10 +365,16 @@ class VisionThread(threading.Thread):
                 cv2.putText(debug, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
                 cv2.putText(debug, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
 
-            rgba = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
+            # 画面の隅の小さなカメラ映像（縮小してから手の骨格を描くので軽い）
+            pip = cv2.resize(frame, config.PIP_SIZE, interpolation=cv2.INTER_AREA)
+            if hand_lm is not None:
+                drawing.draw_landmarks(pip, hand_lm, mp.solutions.hands.HAND_CONNECTIONS,
+                                       drawing.DrawingSpec(color=(80, 220, 255), thickness=1, circle_radius=1),
+                                       drawing.DrawingSpec(color=(255, 255, 255), thickness=1))
+            pip = cv2.cvtColor(pip, cv2.COLOR_BGR2RGBA)
             with self._lock:
                 self._state = st
-                self._frame = rgba
+                self._pip = pip
                 self._frame_id += 1
                 if debug is not None:
                     self._debug = debug

@@ -2,26 +2,22 @@
 main.py
 -------
 BCI オペレーター（ゲーム本体）。実際の BCI 研究の「ハイブリッド BCI」をもとにしたゲーム。
-  ・視線 → 行き先やつかむ物を選ぶ（前頭眼野・視覚野）                       … gaze.py
-  ・手の動き → 擬似ニューロンの発火 → デコード → ロボットアーム（運動野）       … cortex_sim.py / robot.py
-  ・手を握る/開く → 把持ニューロンの発火 → デコード → グリッパー（運動野・体性感覚野）
-  ・背景はカメラ映像（AR）。現実の色の物がゲーム内のアイテムになる             … vision.py / items.py
-  ・横に本物の脳の 3D モデルを表示し、今使っている領域が光る                   … brain_renderer.py
+制限時間内に、机の上の物をロボットでどれだけ集められるかで勝負する（1 ステージ制）。
+  ・視線 → 集める物・カゴを選ぶ                                       … gaze.py
+  ・手の動き → 擬似ニューロンの発火 → デコード → ロボットアーム         … cortex_sim.py / robot.py
+  ・手を握る/開く → 把持ニューロンの発火 → デコード → グリッパー
+  ・現実の色の物をカメラに見せる → ボーナスアイテムが降ってくる         … vision.py / items.py / field.py
+  ・BCI らしさはイベントとして：最初の同期フェーズ、プレイ中の電極劣化（L で再同期するかは自分で判断）
+  ・脳はタイトル（pial → inflated の「接続中」）、結果画面の振り返り、B キーの「裏側」で見られる
 
 ■ 画面（状態）の流れ
-  title（タイトル。脳は pial）
-   → connect（脳と接続中：pial → inflated へふくらむ）
-   → gaze_calib（視線同期：5 点。テストモードでは省略）
-   → stage_intro（ステージの説明）
-   → hand_calib（同期フェーズ：手のキャリブレーション。速度と把持のデコーダを学習）
-   → play（ミッション。mission.py）→ stage_clear（スコアとデコード精度の推移グラフ）
-   → 次のステージの stage_intro … → result（全ステージの結果）→ title
+  title → connect（脳と接続中）→ gaze_calib（視線同期。テストモードでは省略）→ hand_calib（同期フェーズ）
+  → countdown → play（GAME_TIME 秒）→ result（スコア・ハイスコア・プレイ中の脳の活動）→ title
 
 使い方:
     cd 03_bci_game
-    ../.venv/bin/python main.py            # カメラ（視線 + 手 + 色の物）
+    ../.venv/bin/python main.py            # カメラ（視線 + 右手 + 色の物）
     ../.venv/bin/python main.py --test     # カメラなし：マウスの位置 = 視線、マウスの動き = 手、クリック = 握る
-    ../.venv/bin/python main.py --stage 3  # ステージ 3 から始める（確認用）
     ../.venv/bin/python main.py --light    # 軽量モード（config.apply_light_mode）
     ../.venv/bin/python main.py --window   # ディスプレイいっぱいにせず、1280×720 のウィンドウで
 F11 で全画面 ⇔ ウィンドウを切りかえる。
@@ -44,30 +40,34 @@ import numpy as np   # noqa: E402
 from OpenGL import GL as gl   # noqa: E402
 
 import config        # noqa: E402
+import highscore     # noqa: E402
 from brain_model import BrainModel                                  # noqa: E402
+from brain_record import BrainRecord                                # noqa: E402
 from brain_renderer import BrainView                                # noqa: E402
 from cortex_sim import CortexSim                                    # noqa: E402
+from field import Field                                             # noqa: E402
 from game_log import GameLogger                                     # noqa: E402
 from game_view import GameView                                      # noqa: E402
 from gaze import DwellSelector, GazeTracker                         # noqa: E402
 from hand_calib import HandCalibration                              # noqa: E402
 from hand_tracker import MouseHand                                  # noqa: E402
-from items import Goal, RealItemTracker, VirtualItems               # noqa: E402
-from layout import AH, AW, AX, AY, H, W, calib_points, world_radius, world_to_screen   # noqa: E402
-from mission import STAGES, GripSwitch, Mission, gripper_tip        # noqa: E402
+from items import RealItemTracker                                   # noqa: E402
+from layout import H, W, calib_points                               # noqa: E402
+from mission import GripSwitch, Mission, gripper_tip                # noqa: E402
 from robot import Robot                                             # noqa: E402
+from scene3d import Scene3D                                         # noqa: E402
 from vision import VisionThread                                     # noqa: E402
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEBUG_WINDOW = "Camera Debug"
-CONNECT_SEC = config.MORPH_SEC + 0.6
-GOAL_POS = np.array([0.84, 0.15])
+CONNECT_SEC = config.MORPH_SEC + 0.8
+GOAL_POS = np.array(config.GOAL_POS)
+SCENE_RECT = (0, 0, W, H)          # 3D の場面は画面いっぱい（論理座標）
 
 
 class Game:
     def __init__(self, args):
         self.rng = np.random.default_rng()
-        self.first_stage = max(1, min(len(STAGES), args.stage)) - 1
 
         # ---- カメラ（見つからなければテストモード）----
         self.vision = None
@@ -87,6 +87,7 @@ class Game:
         self.model = BrainModel()
         self.brain = BrainView(self.model)
         self.brain.set_surface("pial", animate=False)
+        self.scene = Scene3D(self.rng)
         self.view = GameView(self)
         self.logger = GameLogger(BASE_DIR)
 
@@ -95,25 +96,26 @@ class Game:
         self.gaze = GazeTracker(calib_points())
         self.dwell = DwellSelector()
         self.show_gaze = True
+        self.show_backstage = False      # B キー：脳とラスター（「裏側」）を重ねて表示
         self.robot = Robot()
+        self.field = Field(self.rng)
         self.real_items = RealItemTracker()
-        self.virtual = VirtualItems(self.rng)
-        self.use_virtual = self.test_mode
-        self.extra_items = []         # スキャンしたデジタルの荷物・ゴールに置いた荷物
         self.hand_calib = HandCalibration()
         self.grip_switch = GripSwitch()
         self.message, self.message_until = "", 0.0
-        self.banner, self.banner_until = "", 0.0
-        self.results = []
+        self.flash_until = 0.0           # 電極劣化の赤いフラッシュ
+        self.popups = []                 # (文字, ワールド座標, 出た時刻)：得点の表示
         self.mission = None
-        self.stage_idx = self.first_stage
+        self.record = BrainRecord()
+        self.final = None                # 結果画面に出すもの
         self.recalibrating = False
         self.resume_play = False
         self.selected = None
         self.last_g = 0.0
         self.hand = None
-        self.events = []              # このフレームで起きたこと（ログ用）
-        self.build_cortex(STAGES[self.stage_idx])
+        self.events = []
+        self._prev_score = 0
+        self.build_cortex()
         self.set_state("title")
 
     def _init_window(self):
@@ -150,58 +152,51 @@ class Game:
         glfw.set_mouse_button_callback(self.window, self.on_mouse_button)
 
     # --------------------------------------------------------
-    # ステージ・状態
+    # 状態
     # --------------------------------------------------------
-    @property
-    def stage(self):
-        return STAGES[self.stage_idx]
-
-    def build_cortex(self, st):
-        """ステージのニューロン数・ノイズで運動野を作り直す（デコーダは未学習に戻る）"""
-        self.cortex = CortexSim(st.n_neurons, self.rng, st.noise, st.noise_type)
+    def build_cortex(self):
+        """運動野の擬似ニューロンを作り直す（ニューロン数・ノイズは固定。デコーダは未学習に戻る）"""
+        self.cortex = CortexSim(config.GAME_N_NEURONS, self.rng, config.GAME_NOISE, config.GAME_NOISE_TYPE)
         self.brain.set_neurons(self.cortex.n_all, self.cortex.colors, self.rng)
 
     def set_state(self, s):
         self.state, self.state_t = s, 0.0
         self.events.append(f"state:{s}")
+        cam = self.brain.camera
         if s == "title":
             self.brain.set_surface("pial")
-            self.brain.camera.sway = None
-            self.brain.camera.goal_dist = 3.3
+            cam.sway, cam.goal_dist = None, 3.3
         elif s == "connect":
             self.brain.set_surface("infl")
-            self.brain.camera.yaw, self.brain.camera.pitch, self.brain.camera.goal_dist = -100.0, 30.0, 3.7
-            self.brain.camera.sway = (-105.0, 25.0)       # ゲーム中は左半球の外側面を見ながら ±25° 揺れる
         elif s == "gaze_calib":
             self.gaze.calib.start()
             self.dwell.reset()
-        elif s == "stage_intro":
-            self.build_cortex(self.stage)
-            self.robot.reset()
-            self.selected = None
-            self.extra_items = []
-            self.virtual.spawn(avoid=[self.robot.pos, GOAL_POS])
-            self.grip_switch = GripSwitch()
         elif s == "hand_calib":
             self.hand_calib.start()
         elif s == "play":
-            if self.mission is None or self.mission.stage is not self.stage:
-                self.mission = Mission(self.stage)
-            self.next_acc_log = 0.0
+            self.mission = Mission(self.rng)
+            self.record = BrainRecord()
+            self.grip_switch = GripSwitch()
+            self._prev_score = 0
+            cam.yaw, cam.pitch, cam.goal_dist = -100.0, 30.0, 3.7
+            cam.sway = (-105.0, 25.0)            # 「裏側」の脳は、左半球の外側面を見ながら ±25° 揺れる
+            print(f"[main] 電極劣化の予定（プレイ開始からの秒）: {[round(t) for t in self.mission.degrade_times]}")
+        elif s == "result":
+            self.finish_game()
 
     def start_game(self):
-        self.results = []
-        self.stage_idx = self.first_stage
+        self.build_cortex()
+        self.robot.reset()
+        self.field.reset(self.robot.pos)
+        self.selected = None
         self.mission = None
+        self.popups = []
+        self.recalibrating = False
         self.set_state("connect")
 
-    def notify(self, text, sec=3.5):
+    def notify(self, text, sec=3.0):
         print(f"[main] {text}")
         self.message, self.message_until = text, time.monotonic() + sec
-
-    @property
-    def goal(self):
-        return Goal(GOAL_POS, self.stage.goal_radius)
 
     # --------------------------------------------------------
     # キー・マウス
@@ -222,29 +217,25 @@ class Game:
                 cv2.waitKey(1)
         elif key == glfw.KEY_T and self.vision is not None and self.state == "title":
             self.test_mode = not self.test_mode
-            self.use_virtual = self.test_mode or self.use_virtual
         elif self.state == "title" and go:
             self.start_game()
-        elif self.state == "stage_intro" and go:
-            self.set_state("hand_calib")
-        elif self.state == "stage_clear" and go:
-            self.next_stage()
         elif self.state == "result" and go:
             self.set_state("title")
+        elif key == glfw.KEY_B:
+            self.show_backstage = not self.show_backstage
         elif key == glfw.KEY_G:
             self.show_gaze = not self.show_gaze
-        elif key == glfw.KEY_C and self.state == "play" and not self.test_mode:
-            self.resume_play = True                      # 視線同期をやり直したら play に戻る
-            self.set_state("gaze_calib")
+        elif key == glfw.KEY_C and self.state == "play" and not self.test_mode and not self.recalibrating:
+            self.resume_play = True                      # 視線同期をやり直したら play に戻る（時間は進む）
+            self.state, self.state_t = "gaze_calib", 0.0
+            self.gaze.calib.start()
         elif key == glfw.KEY_L and self.state == "play" and not self.recalibrating:
             self.recalibrating = True                   # 再同期（制限時間は進み続ける）
             self.hand_calib.start()
+            self.record.mark(self.mission.play_time, "recal_start")
+            self.mission.log("recalibrate_start")
             self.events.append("recalibrate_start")
-            self.notify("再同期を開始：ターゲットを手で追いかける")
-        elif key == glfw.KEY_V and self.state == "play":
-            self.use_virtual = not self.use_virtual
-            self.selected = None
-            self.notify("仮想アイテム" if self.use_virtual else "現実の色の物をアイテムにする")
+            self.notify("再同期：ターゲットを手で追いかける")
         elif key == glfw.KEY_P and self.vision is not None and not self.test_mode:
             self.n_registered = getattr(self, "n_registered", 0) + 1
             name = f"color{(self.n_registered - 1) % 3 + 1}"
@@ -283,8 +274,8 @@ class Game:
         """(手の状態, 本当の握り具合 g, 注視点, 色の塊, 視線の特徴量)"""
         if self.test_mode:
             m = self.mouse_layout()
-            inside = AX <= m[0] <= AX + AW and AY <= m[1] <= AY + AH
-            hand = self.mouse_hand.update((m[0] - AX) / AW, 1.0 - (m[1] - AY) / AH, inside, now)
+            inside = 0 <= m[0] <= W and 0 <= m[1] <= H
+            hand = self.mouse_hand.update(m[0] / W, 1.0 - m[1] / H, inside, now)
             g = 1.0 if self.mouse_down else 0.0            # クリック = 握る
             gaze = self.gaze.update(None, dt, mouse=m) if inside else None
             return hand, g, gaze, [], None
@@ -293,10 +284,6 @@ class Game:
             self.last_g = 1.0 - vs.hand_open             # 手が一瞬見えなくなっても、握り具合は直前の値を保つ
         gaze = self.gaze.update(vs.gaze_feat, dt, feat_time=vs.gaze_time) if self.gaze.calibrated else None
         return vs.hand, self.last_g, gaze, vs.blobs, vs.gaze_feat
-
-    def items(self, blobs, now, dt):
-        base = self.virtual.items if self.use_virtual else self.real_items.update(blobs, now, dt)
-        return base + self.extra_items
 
     # --------------------------------------------------------
     # メインループ
@@ -318,7 +305,6 @@ class Game:
 
                 hand, g, gaze, blobs, feat = self.read_inputs(now, dt)
                 self.hand = hand
-                items = self.items(blobs, now, dt)
 
                 # ---- 運動野のシミュレーション（20 ms 刻み）。同期フェーズのデータもここで集める ----
                 acc += dt
@@ -335,16 +321,19 @@ class Game:
                     acc = 0.0
                 self.cortex.decay(dt)
 
-                selecting = self.update_state(dt, gaze, feat, items)
+                selecting = self.update_state(dt, gaze, feat, blobs, now)
                 self.robot.update(dt)
 
-                # ---- 脳の光 ----
+                # ---- 脳の光（「裏側」と結果画面の振り返り用）----
                 #   視線で選ぶ → 前頭眼野・視覚野、手を動かす → 運動野、握る → 運動野 + 体性感覚野
-                motor = max(self.cortex.motor_drive, self.cortex.grip_drive)
-                self.brain.update_glow({"fef": selecting, "visual": selecting, "motor": motor, "hand": motor,
-                                        "somato": self.cortex.grip_drive}, dt)
+                if self.state != "result":
+                    motor = max(self.cortex.motor_drive, self.cortex.grip_drive)
+                    self.brain.update_glow({"fef": selecting, "visual": selecting, "motor": motor, "hand": motor,
+                                            "somato": self.cortex.grip_drive}, dt)
+                if self.state == "play":
+                    self.record.update(dt, self.brain.glow, self.cortex.metrics, self.mission.play_time)
 
-                self.view.render(now - start, dt, gaze, items, fps)
+                self.view.render(now - start, dt, gaze, fps)
                 self.log_frame(now - start, gaze, g)
                 self.update_debug_window()
         finally:
@@ -356,12 +345,14 @@ class Game:
             if path:
                 print(f"[main] プレイログを保存しました: {path}")
 
-    def update_state(self, dt, gaze, feat, items):
+    def update_state(self, dt, gaze, feat, blobs, now):
         """状態ごとの処理。視線で選んでいる強さ（脳の前頭眼野・視覚野の光）を返す"""
         s = self.state
         if s == "connect" and self.state_t >= CONNECT_SEC:
-            self.set_state("stage_intro" if self.test_mode else "gaze_calib")
+            self.set_state("hand_calib" if self.test_mode else "gaze_calib")
         elif s == "gaze_calib":
+            if self.resume_play and self.mission is not None:
+                self.mission.tick(dt)                    # プレイ中の視線同期のやり直しも、時間は進む
             if self.test_mode:
                 self.gaze.calib.cancel()
                 self.after_gaze_calib()
@@ -372,10 +363,10 @@ class Game:
                 self.events.append(f"gaze_calib_ok:err_px={self.gaze.calib.residual:.0f}")
                 self.after_gaze_calib()
             return 1.0
-        elif s == "stage_intro" and self.state_t >= config.STAGE_INTRO_SEC:
-            self.set_state("hand_calib")
+        elif s == "countdown" and self.state_t >= config.COUNTDOWN_SEC:
+            self.set_state("play")
         elif s == "play":
-            return self.update_play(dt, gaze, items)
+            return self.update_play(dt, gaze, blobs, now)
         return 0.0
 
     def after_gaze_calib(self):
@@ -383,7 +374,7 @@ class Game:
             self.resume_play = False
             self.state, self.state_t = "play", 0.0
         else:
-            self.set_state("stage_intro")
+            self.set_state("hand_calib")
 
     def finish_hand_calib(self):
         hc = self.hand_calib
@@ -399,49 +390,65 @@ class Game:
             else:
                 self.notify(msg, 4.0)
                 self.recalibrating = False
+                self.record.mark(self.mission.play_time, "recal_end")
             return
         info = self.cortex.fit(*hc.data())
         lv = self.cortex.grip.levels
         self.events.append(f"hand_calib_ok:r2={info['r2']:.2f}:grip_sep={hc.grip_separation:.2f}"
                            + (f":grip_levels={lv[0]:.2f}/{lv[1]:.2f}" if lv else ""))
-        self.notify(f"同期完了（ニューロン {self.cortex.n_alive} 個、学習データでの R² = {info['r2']:.2f}）")
         self.grip_switch = GripSwitch()
-        self.recalibrating = False
-        if self.state == "hand_calib":
-            self.set_state("play")
+        if self.recalibrating:
+            self.recalibrating = False
+            self.record.mark(self.mission.play_time, "recal_end")
+            self.mission.log("recalibrate_ok")
+            self.notify("再同期 完了：精度が戻った")
+        elif self.state == "hand_calib":
+            self.notify("同期 完了")
+            self.set_state("countdown")
 
     # --------------------------------------------------------
-    def update_play(self, dt, gaze, items):
+    def update_play(self, dt, gaze, blobs, now):
         m = self.mission
         m.tick(dt)
-        st = self.stage
 
-        # ---- 電極劣化イベント（ステージ 3）----
-        if st.degrade_at is not None and not m.degraded and m.play_time >= st.degrade_at:
-            m.degraded = True
-            k = self.cortex.dropout(st.degrade_fraction, config.DEGRADE_GRIP_FRACTION)
+        # ---- 電極劣化イベント ----
+        if m.degrade_due():
+            k = self.cortex.dropout(config.DEGRADE_FRACTION, config.DEGRADE_GRIP_FRACTION)
             m.log(f"degrade:{k}")
+            self.record.mark(m.play_time, "degrade")
             self.events.append(f"degrade:{k}")
-            self.banner, self.banner_until = "electrode", time.monotonic() + 5.0
+            self.flash_until = time.monotonic() + config.DEGRADE_FLASH_SEC
+            self.scene.shake()
+            self.notify("電極劣化！ アームが流されるようになった（L で再同期）", 5.0)
 
-        # ---- デコード精度の推移を記録 ----
-        if m.play_time >= self.next_acc_log:
-            self.cortex.metrics.compute()
-            m.result.accuracy.append((m.play_time, self.cortex.metrics.corr, self.cortex.metrics.rmse))
-            self.next_acc_log = m.play_time + config.ACCURACY_LOG_SEC
+        # ---- ボーナス：現実の色の物を BONUS_SHOW_SEC 秒見せると降ってくる ----
+        if not self.test_mode:
+            for r in self.real_items.update(blobs, now, dt):
+                if not r.used and now - r.first_seen >= config.BONUS_SHOW_SEC and m.bonus_allowed():
+                    r.used = True
+                    self.field.spawn("bonus", avoid=[self.robot.pos])
+                    m.on_bonus()
+                    self.events.append(f"bonus_drop:{r.color}")
+                    self.notify("ボーナスが降ってきた！（高得点）")
+
+        self.field.update(dt, avoid=[self.robot.pos])
 
         selecting = 0.0
         if not self.recalibrating:
-            # ---- 視線で選ぶ：持っていないときはアイテムだけ、持っているときはゴールだけを選べる ----
-            #      （アームを動かしている間に視線が別の物に留まって、運ぶ途中で行き先が変わらないように）
+            # ---- 視線で選ぶ：持っていないときは物だけ、持っているときはカゴだけ ----
+            targets = []
             if m.held is None:
-                targets = [(it.id, world_to_screen(it.pos), world_radius(it.radius)) for it in items
-                           if m.selectable(it)]
+                for it in self.field.selectable():
+                    p = self.scene.project(it.pos, it.radius, SCENE_RECT)
+                    if p is not None:
+                        targets.append((it.id, p, self.scene.screen_radius(it.pos, 0.0, it.radius, SCENE_RECT)))
             else:
-                targets = [("goal", world_to_screen(GOAL_POS), world_radius(st.goal_radius))]
+                p = self.scene.project(GOAL_POS, 0.03, SCENE_RECT)
+                if p is not None:
+                    targets.append(("goal", p, self.scene.screen_radius(GOAL_POS, 0.0, config.GOAL_RADIUS, SCENE_RECT)))
             chosen = self.dwell.update(gaze, targets, dt, exclude=self.selected)
             if chosen is not None:
-                self.select(chosen, items)
+                self.select(chosen)
             if self.dwell.focus is not None:
                 selecting = 0.4 + 0.6 * self.dwell.progress
 
@@ -451,68 +458,81 @@ class Game:
             gd = self.cortex.grip
             ev = self.grip_switch.update(gd.value, gd.close_th, gd.open_th)
             if ev is not None:
-                self.on_grip_event(ev, items)
+                self.on_grip_event(ev)
         else:
             self.robot.drive_arm(np.zeros(2), dt)
 
-        if m.held is not None:                     # つかんでいる荷物はグリッパーといっしょに動く
+        if m.held is not None:                     # つかんでいる物はグリッパーといっしょに動く
             m.held.pos = gripper_tip(self.robot)
 
         if m.done:
             self.recalibrating = False
             self.hand_calib.cancel()
-            self.results.append(m.finish())
-            self.events.append(f"stage_end:score={m.result.score}")
-            self.set_state("stage_clear")
+            self.set_state("result")
         return selecting
 
-    def on_grip_event(self, ev, items):
+    def on_grip_event(self, ev):
         m = self.mission
         self.robot.set_grip(ev == "close")
         tip = gripper_tip(self.robot)
         self.events.append(f"grip_{ev}")
         if ev == "close":
-            res = m.on_close(tip, items)
+            res = m.on_close(tip, self.field.items)
             if res == "miss":
-                self.notify("つかみ損ね（失敗 +1）")
+                self.notify(f"つかみ損ね（コンボ ×{m.combo_mult:.1f} に下がった）")
             elif res is not None:
-                if res[1] is not None:                     # 現実の物をスキャンして作った荷物
-                    self.extra_items.append(res[1])
-                    self.notify("スキャンしてつかんだ！ ゴールを見つめて移動")
-                else:
-                    self.notify("つかんだ！ ゴールを見つめて移動")
+                self.events.append(f"grasp_ok:{res.type}")
+                self.record.snapshot_raster(self.cortex.raster)
+                self.notify(f"{res.spec['name']}をつかんだ！ カゴを見つめて運ぶ")
                 self.selected = None
             return
-        res = m.on_open(tip, self.goal)
+        res = m.on_open(tip)
         if res is None:
             return
-        kind, it, pts, d = res
+        kind, it, pts = res
         if kind == "deliver":
-            self.notify(f"成功！ +{pts}（ゴールの中心から {world_radius(d):.0f} 画素）")
+            self.field.remove(it)
+            self.field.schedule_refill()
+            self.popups.append((f"+{pts}", GOAL_POS.copy(), time.monotonic()))
+            self.events.append(f"deliver_ok:{it.type}:+{pts}")
+            self.notify(f"{it.spec['name']} +{pts}" + (f"（コンボ ×{m.combo_mult:.1f}）" if m.combo > 0 else ""))
         else:
-            self.notify("ゴールの外に落とした（失敗 +1）")
+            self.events.append(f"drop:{it.type}")
+            self.notify(f"カゴの外に落とした（床に残っている。コンボ ×{m.combo_mult:.1f}）")
         self.selected = None
 
-    def select(self, chosen, items):
+    def select(self, chosen):
         """視線で対象が決定されたとき：ずれを補正し、ロボットの台座をその近くへ移動させる"""
-        pos = GOAL_POS if chosen == "goal" else next((i.pos for i in items if i.id == chosen), None)
-        if pos is None:
-            return
+        if chosen == "goal":
+            pos, h = GOAL_POS, 0.03
+        else:
+            it = next((i for i in self.field.items if i.id == chosen), None)
+            if it is None:
+                return
+            pos, h = it.pos, it.radius
         if not self.test_mode:
-            self.gaze.correct(world_to_screen(pos))
+            p = self.scene.project(pos, h, SCENE_RECT)
+            if p is not None:
+                self.gaze.correct(p)
         self.selected = chosen
         self.robot.approach(pos)
         self.robot.offset = None
         self.events.append(f"lock:{chosen}")
-        self.notify("ゴールをロックオン → 移動" if chosen == "goal" else "アイテムをロックオン → 移動")
 
-    def next_stage(self):
-        if self.stage_idx + 1 >= len(STAGES):
-            self.set_state("result")
-            return
-        self.stage_idx += 1
-        self.mission = None
-        self.set_state("stage_intro")
+    def finish_game(self):
+        """ゲーム終了：ハイスコアに加え、結果画面の振り返りを用意する"""
+        m = self.mission
+        if self.record.raster is None:
+            self.record.snapshot_raster(self.cortex.raster)
+        scores, rank = highscore.add(m.result.score, m.result.collected)
+        self.final = {"result": m.result, "scores": scores, "rank": rank, "record": self.record,
+                      "usage": self.record.usage()}
+        self.events.append(f"game_end:score={m.result.score}:collected={m.result.collected}")
+        print(f"[main] 終了：スコア {m.result.score}、集めた数 {m.result.collected}、失敗 {m.result.failures}、"
+              f"順位 {None if rank is None else rank + 1}")
+        # 結果画面の脳：プレイ中にどれだけ使ったかで光らせる
+        self.brain.glow[:] = 0
+        self.brain.update_glow(self.final["usage"], 10.0)
 
     # --------------------------------------------------------
     def check_color_register(self):
@@ -524,17 +544,21 @@ class Game:
             return
         self.pending_register = None
         if res[1] is None:
-            self.notify("色を登録できませんでした：中央の枠に色のはっきりした物を入れてください")
+            self.notify("色を登録できませんでした：カメラの中央に色のはっきりした物を入れてください")
         else:
             config.ITEM_COLORS[name] = res[1]
-            self.use_virtual = False
-            self.notify(f"色を登録しました（{name}）")
+            self.notify(f"色を登録しました（{name}）。この色の物を見せるとボーナスが降ってくる")
 
     def log_frame(self, t, gaze, g):
         m = self.mission if self.state == "play" else None
         h = self.hand
+        held = None if m is None else m.held
+        delta = None
+        if m is not None:
+            delta = m.result.score - self._prev_score
+            self._prev_score = m.result.score
         self.logger.record(
-            time_sec=t, state=self.state + ("+recal" if self.recalibrating else ""), stage=self.stage.number,
+            time_sec=t, state=self.state + ("+recal" if self.recalibrating else ""),
             mode="test" if self.test_mode else "camera",
             gaze_x=None if gaze is None else float(gaze[0]), gaze_y=None if gaze is None else float(gaze[1]),
             dwell_target=self.dwell.focus, dwell_progress=self.dwell.progress,
@@ -542,11 +566,13 @@ class Game:
             decoded_vx=float(self.cortex.v_hat[0]), decoded_vy=float(self.cortex.v_hat[1]),
             decoder="LIN" if self.cortex.calibrated else "PV", true_grip=float(g),
             decoded_grip=float(self.cortex.grip.value), gripper_closed=int(self.grip_switch.closed),
-            holding=int(m is not None and m.held is not None),
+            holding=int(held is not None), holding_type=None if held is None else held.type,
             robot_x=float(self.robot.pos[0]), robot_y=float(self.robot.pos[1]),
             n_alive=self.cortex.n_alive, n_neurons=self.cortex.n_all,
-            score=None if m is None else m.result.score, time_left=None if m is None else m.time_left,
-            event=";".join(self.events))
+            degrade_count=None if m is None else m.degrade_count,
+            collected=None if m is None else m.result.collected, score=None if m is None else m.result.score,
+            score_delta=delta, combo=None if m is None else m.combo_mult,
+            time_left=None if m is None else m.time_left, event=";".join(self.events))
         self.events = []
 
     def update_debug_window(self):
@@ -562,7 +588,6 @@ def main():
     parser = argparse.ArgumentParser(description="BCI オペレーター")
     parser.add_argument("--camera", type=int, default=config.CAMERA_INDEX)
     parser.add_argument("--test", action="store_true", help="カメラを使わない（マウスで視線・手・握るの代わり）")
-    parser.add_argument("--stage", type=int, default=1, help="このステージから始める（1〜4）")
     parser.add_argument("--light", action="store_true", help="軽量モード（重い PC 向け）")
     parser.add_argument("--window", action="store_true", help="1280×720 のウィンドウで開く")
     args = parser.parse_args()
