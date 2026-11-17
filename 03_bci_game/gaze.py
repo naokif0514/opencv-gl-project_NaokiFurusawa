@@ -75,55 +75,119 @@ class OneEuroFilter:
 
 
 class GazeCalibration:
-    """5 点の視線キャリブレーション（視線同期）"""
+    """
+    5 点の視線キャリブレーション（視線同期）と、そのあとの確認。
+      1. 学習（"calib"）：points を順に見つめてもらい、特徴量 → 画面の位置の線形モデルを作る
+      2. 確認（"check"）：学習に使っていない check_points を見つめてもらい、モデルで予測した位置との
+         平均のずれ（check_error）を測る。学習した点での誤差（residual）は実際より小さく出るので、こちらで判定する
+    best_model / best_error には、やり直したなかで一番よかった結果を残す
+    """
 
-    def __init__(self, points):
+    def __init__(self, points, check_points=()):
         self.points = [np.asarray(p, dtype=np.float64) for p in points]   # 画面座標（画素）
+        self.check_points = [np.asarray(p, dtype=np.float64) for p in check_points]
         self.active = False
+        self.phase = "calib"
         self.model = None           # (Ax, Ay)：x = Ax · [1, f0, f2]、y = Ay · [1, f1, f3]
         self.residual = None        # 学習した点での平均のずれ [画素]
+        self.check_error = None     # 確認の点での平均のずれ [画素]
+        self.best_model, self.best_error = None, None
+        self.tries = 0              # 確認で失敗した回数
 
     def start(self):
         self.active = True
+        self.phase = "calib"
         self.index = 0
         self.t = 0.0
         self.samples = [[] for _ in self.points]
+        self.check_samples = [[] for _ in self.check_points]
+
+    def reset_tries(self):
+        self.best_model, self.best_error, self.tries = None, None, 0
 
     def cancel(self):
         self.active = False
 
     @property
+    def _targets(self):
+        return self.points if self.phase == "calib" else self.check_points
+
+    @property
+    def _settle(self):
+        return config.GAZE_CALIB_SETTLE if self.phase == "calib" else config.GAZE_CHECK_SETTLE
+
+    @property
+    def _collect(self):
+        return config.GAZE_CALIB_COLLECT if self.phase == "calib" else config.GAZE_CHECK_COLLECT
+
+    @property
     def current_point(self):
-        return self.points[self.index] if self.active else None
+        return self._targets[self.index] if self.active else None
 
     @property
     def collecting(self):
-        return self.active and self.t >= config.GAZE_CALIB_SETTLE
+        return self.active and self.t >= self._settle
+
+    @property
+    def settle_progress(self):
+        return min(1.0, self.t / self._settle)
+
+    @property
+    def collect_progress(self):
+        return min(1.0, max(0.0, (self.t - self._settle) / self._collect))
 
     @property
     def point_progress(self):
         """今の点での進み具合 0〜1（演出用）"""
-        return min(1.0, self.t / (config.GAZE_CALIB_SETTLE + config.GAZE_CALIB_COLLECT))
+        return min(1.0, self.t / (self._settle + self._collect))
 
     def step(self, feat, dt):
-        """毎フレーム呼ぶ。終わったら True を返す（失敗なら self.model は None のまま）"""
+        """毎フレーム呼ぶ。学習と確認が終わったら True を返す（判定は呼び出し側で check_error を見る）"""
         if not self.active:
             return False
         self.t += dt
+        buf = self.samples if self.phase == "calib" else self.check_samples
         if self.collecting and feat is not None:
-            self.samples[self.index].append(np.asarray(feat))
-        if self.t >= config.GAZE_CALIB_SETTLE + config.GAZE_CALIB_COLLECT:
-            if len(self.samples[self.index]) < 3:       # 顔が見えていなかったら、同じ点をやり直す
+            buf[self.index].append(np.asarray(feat))
+        if self.t >= self._settle + self._collect:
+            if len(buf[self.index]) < 3:       # 顔が見えていなかったら、同じ点をやり直す
                 self.t = 0.0
-                self.samples[self.index] = []
+                buf[self.index] = []
                 return False
             self.index += 1
             self.t = 0.0
-            if self.index >= len(self.points):
-                self.active = False
+            if self.phase == "calib" and self.index >= len(self.points):
                 self._fit()
-                return True
+                if not self.check_points:
+                    self.check_error = self.residual
+                    return self._finish()
+                self.phase, self.index = "check", 0
+            elif self.phase == "check" and self.index >= len(self.check_points):
+                F = np.array([np.median(s, axis=0) for s in self.check_samples])
+                pred = np.array([self.predict(f) for f in F])
+                self.check_error = float(np.mean(np.linalg.norm(pred - np.array(self.check_points), axis=1)))
+                return self._finish()
         return False
+
+    def _finish(self):
+        self.active = False
+        if self.best_error is None or self.check_error < self.best_error:
+            self.best_model, self.best_error = self.model, self.check_error
+        if self.check_error > config.GAZE_CHECK_MAX_ERR:
+            self.tries += 1
+        return True
+
+    @property
+    def passed(self):
+        return self.check_error is not None and self.check_error <= config.GAZE_CHECK_MAX_ERR
+
+    @property
+    def can_skip(self):
+        """ENTER で「今までで一番よかった結果」で進めるか"""
+        return self.tries >= config.GAZE_CHECK_SKIP_AFTER and self.best_model is not None
+
+    def use_best(self):
+        self.model, self.check_error = self.best_model, self.best_error
 
     def _fit(self):
         F = np.array([np.median(s, axis=0) for s in self.samples])        # 点ごとの中央値 (5, 4)
@@ -185,8 +249,8 @@ class GazeTracker:
     テストモードではマウスの位置をそのまま使う
     """
 
-    def __init__(self, calib_points):
-        self.calib = GazeCalibration(calib_points)
+    def __init__(self, calib_points, check_points=()):
+        self.calib = GazeCalibration(calib_points, check_points)
         self.filter = OneEuroFilter()
         self.fixation = FixationFilter()
         self.feats = deque()        # (時刻, 特徴量)：平均をとるための直近の特徴量

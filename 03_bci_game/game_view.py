@@ -302,7 +302,7 @@ class GameView:
             b.rect(W / 2 - w / 2, H - 70, w, 38, (0.02, 0.04, 0.08, 0.85))
 
         # ---- 小さなカメラ映像（手の骨格つき）----
-        px, py, pw, ph = config.PIP_RECT
+        px, py, pw, ph = self._pip_rect()
         if not g.test_mode:
             b.rect(px - 2, py - 2, pw + 4, ph + 4, (0.3, 0.45, 0.65, 1))
         # ---- 裏側（B キー）----
@@ -339,21 +339,30 @@ class GameView:
                    p[0] + r * math.cos(a1), p[1] + r * math.sin(a1), 5, (*color, 0.95))
 
     def _draw_gaze_calib(self, t):
+        """視線同期：学習の点（水色）→ 確認の点（金色）。終わった点は小さな点で残す"""
         b = self.batch
         b.rect(0, HUD, W, H - HUD, (0.0, 0.02, 0.05, 0.7))
         cal = self.g.gaze.calib
-        for i, p in enumerate(cal.points):
-            b.circle(*p, 5, (0.3, 1.0, 0.6, 0.9) if i < cal.index else (0.5, 0.55, 0.65, 0.5), 12)
+        check = cal.phase == "check"
+        col = (1.0, 0.8, 0.3) if check else (0.4, 0.9, 1.0)
+        for i, p in enumerate(cal.check_points if check else cal.points):
+            b.circle(*p, 5, (*col, 0.9) if i < cal.index else (0.5, 0.55, 0.65, 0.5), 12)
         p = cal.current_point
         if p is None:
             return
         pulse = 0.5 + 0.5 * math.sin(t * 8)
-        shrink = 1.0 - min(1.0, cal.t / config.GAZE_CALIB_SETTLE)
-        b.ring(*p, 16 + 40 * shrink, 2, (0.4, 0.9, 1.0, 0.6 + 0.3 * pulse), 40)
+        shrink = 1.0 - cal.settle_progress
+        b.ring(*p, 16 + 40 * shrink, 2, (*col, 0.6 + 0.3 * pulse), 40)
         b.circle(*p, 7, (1.0, 1.0, 1.0, 1.0), 16)
         if cal.collecting:
-            self._progress_ring(p, 26, (cal.t - config.GAZE_CALIB_SETTLE) / config.GAZE_CALIB_COLLECT,
-                                (0.4, 0.9, 1.0))
+            self._progress_ring(p, 26, cal.collect_progress, col)
+
+    def _pip_rect(self):
+        """小さなカメラ映像の位置。視線同期の間は、右下の点を隠さないよう画面の下の中央へ"""
+        if self.g.state == "gaze_calib":
+            pw, ph = config.PIP_RECT[2:]
+            return (W / 2 - pw / 2, H - 16 - ph, pw, ph)
+        return config.PIP_RECT
 
     def _draw_hand_calib(self):
         """同期フェーズ：画面中央の同期パッドに、マゼンタのターゲットと自分の手の位置（白い輪）"""
@@ -570,12 +579,24 @@ class GameView:
         cx = W / 2
         if g.state == "gaze_calib":
             cal = g.gaze.calib
-            n = len(cal.points)
-            self._jt(img, f"GAZE SYNC  {min(cal.index + 1, n)}/{n}", "GAZE SYNC", cx, HUD + 22, 26, ACCENT, "center",
-                     font="display", tracking=0.12)
+            check = cal.phase == "check"
+            n = len(cal.check_points if check else cal.points)
+            title = "GAZE CHECK" if check else "GAZE SYNC"
+            self._jt(img, f"{title}  {min(cal.index + 1, n)}/{n}", title, cx, HUD + 22, 26, GOLD if check else ACCENT,
+                     "center", font="display", tracking=0.12)
             face = g.vision.get_state().face_detected if g.vision else False
-            self._jt(img, "光る点を見つめてください（頭は動かさずに）" if face else "顔が見つかりません：カメラの正面へ",
-                     "look at the dot", cx, HUD + 62, 16, INK if face else BAD, "center")
+            if not face:
+                guide = "顔が見つかりません：カメラの正面へ"
+            elif check:
+                guide = f"確認：金色の点を見つめてください（ずれ {config.GAZE_CHECK_MAX_ERR:.0f} 画素以下で合格）"
+            else:
+                guide = "光る点を見つめてください（頭は動かさずに）"
+            self._jt(img, guide, "look at the dot", cx, HUD + 62, 16, INK if face else BAD, "center")
+            if cal.tries > 0:
+                last = f"前回のずれ 約 {cal.check_error:.0f} 画素 → {cal.tries + 1} 回目"
+                if cal.can_skip:
+                    last += f"　　ENTER：今までで一番よい結果（約 {cal.best_error:.0f} 画素）で進む"
+                self._jt(img, last, "retry", cx, HUD + 88, 14, GOLD, "center")
         if g.hand_calib.active:
             hc = g.hand_calib
             title = "RESYNC" if g.recalibrating else "HAND SYNC"
@@ -607,7 +628,7 @@ class GameView:
             self._jt(img, msg, msg, cx, H - 64, 19, (255, 255, 255), "center")
 
         # ---- 小さなカメラ映像・裏側の見出し ----
-        px, py, pw, ph = config.PIP_RECT
+        px, py, pw, ph = self._pip_rect()
         if g.test_mode:
             self._jt(img, "TEST MODE  ―  マウス = 視線・手、クリック = 握る", "TEST MODE", W - 16, H - 28, 13,
                      (255, 200, 110), "right", font="tech", tracking=0.05)

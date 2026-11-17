@@ -42,15 +42,29 @@ class GripSwitch:
         # 最初は「閉じている」扱いにして、一度手を開いた（推定値が下のしきい値を下回った）あとで
         # 「握る」を受け付ける（同期フェーズは握る区間で終わるので、直後に勝手に握ったことにならないように）
         self.closed = True
+        self.below = 0.0            # 推定値が「開いた」のしきい値の下に続いている時間 [秒]
 
-    def update(self, value, close_th=config.GRIP_CLOSE_TH, open_th=config.GRIP_OPEN_TH):
-        """状態が変わったら "close" / "open" を返す（しきい値は把持のデコーダが同期フェーズで決めたもの）"""
-        if not self.closed and value >= close_th:
-            self.closed = True
-            return "close"
-        if self.closed and value <= open_th:
-            self.closed = False
-            return "open"
+    def update(self, value, close_th=config.GRIP_CLOSE_TH, open_th=config.GRIP_OPEN_TH, dt=0.0,
+               hold=config.GRIP_OPEN_HOLD_SEC):
+        """
+        状態が変わったら "close" / "open" を返す（しきい値は把持のデコーダが同期フェーズで決めたもの）。
+        開くのは、推定値が open_th 以下に hold 秒続いたとき（把持ニューロンの推定値は、手を握ったままでも
+        ノイズで一瞬しきい値を下回ることがあり、そのたびに物を落としていたため）
+        """
+        if not self.closed:
+            if value >= close_th:
+                self.closed = True
+                self.below = 0.0
+                return "close"
+            return None
+        if value <= open_th:
+            self.below += dt
+            if self.below >= hold:
+                self.closed = False
+                self.below = 0.0
+                return "open"
+        else:
+            self.below = 0.0
         return None
 
 

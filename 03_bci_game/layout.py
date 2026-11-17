@@ -18,6 +18,13 @@ def pad_to_screen(p):
     return np.array([PX + p[0] * PW, PY + (1.0 - p[1]) * PH])
 
 
+def check_points():
+    """視線同期のあとの確認の点（学習に使わない 3 点）：中央の左右と、中央の少し上"""
+    top = config.HUD_HEIGHT
+    cy = (top + H) / 2
+    return [(W * 0.30, cy + (H - top) * 0.18), (W * 0.70, cy + (H - top) * 0.18), (W / 2, top + (H - top) * 0.25)]
+
+
 def calib_points():
     """視線同期の点：画面の四隅（少し内側）と中央の 5 点。GAZE_CALIB_POINTS = 9 なら辺の中点も加える"""
     m = config.GAZE_CALIB_INSET

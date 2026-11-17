@@ -55,7 +55,7 @@ from gaze import DwellSelector, GazeTracker                         # noqa: E402
 from hand_calib import HandCalibration                              # noqa: E402
 from hand_tracker import MouseHand                                  # noqa: E402
 from items import RealItemTracker                                   # noqa: E402
-from layout import H, W, calib_points                               # noqa: E402
+from layout import H, W, calib_points, check_points                 # noqa: E402
 from mission import GripSwitch, Mission, gripper_tip                # noqa: E402
 from robot import Robot                                             # noqa: E402
 from scene3d import Scene3D                                         # noqa: E402
@@ -96,7 +96,7 @@ class Game:
 
         self.mouse_hand = MouseHand()
         self.mouse_down = False
-        self.gaze = GazeTracker(calib_points())
+        self.gaze = GazeTracker(calib_points(), check_points())
         self.dwell = DwellSelector()
         self.show_gaze = True
         self.show_backstage = False      # B キー：脳とラスター（「裏側」）を重ねて表示
@@ -176,6 +176,7 @@ class Game:
         elif s == "connect":
             self.brain.set_surface("infl")
         elif s == "gaze_calib":
+            self.gaze.calib.reset_tries()
             self.gaze.calib.start()
             self.dwell.reset()
         elif s == "hand_calib":
@@ -239,6 +240,8 @@ class Game:
                 key, "normal" if self.degrade_on else "challenge"))
         elif key == glfw.KEY_T and self.vision is not None and self.state == "title":
             self.test_mode = not self.test_mode
+        elif self.state == "gaze_calib" and key == glfw.KEY_ENTER and self.gaze.calib.can_skip:
+            self.finish_gaze_calib(best=True)
         elif self.state == "title" and go:
             self.start_game()
         elif self.state == "result" and go:
@@ -250,6 +253,7 @@ class Game:
         elif key == glfw.KEY_C and self.state == "play" and not self.test_mode and not self.recalibrating:
             self.resume_play = True                      # 視線同期をやり直したら play に戻る（時間は進む）
             self.state, self.state_t = "gaze_calib", 0.0
+            self.gaze.calib.reset_tries()
             self.gaze.calib.start()
         elif key == glfw.KEY_L and self.state == "play" and not self.recalibrating:
             self.recalibrating = True                   # 再同期（制限時間は進み続ける）
@@ -386,17 +390,34 @@ class Game:
                 self.gaze.calib.cancel()
                 self.after_gaze_calib()
             elif self.gaze.calib.step(feat, dt):
-                self.gaze.reset_filters()
-                self.gaze.reset_offset()
-                self.notify(f"視線同期 完了（ずれ 約 {self.gaze.calib.residual:.0f} 画素）")
-                self.events.append(f"gaze_calib_ok:err_px={self.gaze.calib.residual:.0f}")
-                self.after_gaze_calib()
+                cal = self.gaze.calib
+                if cal.passed:
+                    self.finish_gaze_calib()
+                else:
+                    # 確認の点でのずれが大きい：もう一度（ENTER で今までで一番よかった結果で進める）
+                    self.events.append(f"gaze_calib_retry:err_px={cal.check_error:.0f}")
+                    self.notify(f"ずれ 約 {cal.check_error:.0f} 画素（目標 {config.GAZE_CHECK_MAX_ERR:.0f} 以下）"
+                                f" → もう一度", 3.5)
+                    cal.start()
             return 1.0
         elif s == "countdown" and self.state_t >= config.COUNTDOWN_SEC:
             self.set_state("play")
         elif s == "play":
             return self.update_play(dt, gaze, blobs, now)
         return 0.0
+
+    def finish_gaze_calib(self, best=False):
+        """視線同期の終わり（best = True なら、やり直したなかで一番よかった結果を使う）"""
+        cal = self.gaze.calib
+        if best:
+            cal.cancel()
+            cal.use_best()
+        self.gaze.reset_filters()
+        self.gaze.reset_offset()
+        self.notify(f"視線同期 完了（ずれ 約 {cal.check_error:.0f} 画素）")
+        self.events.append(f"gaze_calib_ok:err_px={cal.check_error:.0f}:train_px={cal.residual:.0f}"
+                           f":tries={cal.tries + 1}" + (":best" if best else ""))
+        self.after_gaze_calib()
 
     def after_gaze_calib(self):
         if self.resume_play:
@@ -493,7 +514,7 @@ class Game:
             if not self.robot.moving:
                 self.robot.drive_arm(self.cortex.v_hat * config.ARM_VEL_GAIN, dt)
             gd = self.cortex.grip
-            ev = self.grip_switch.update(gd.value, gd.close_th, gd.open_th)
+            ev = self.grip_switch.update(gd.value, gd.close_th, gd.open_th, dt)
             if ev is not None:
                 self.on_grip_event(ev)
         else:
