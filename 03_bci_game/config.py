@@ -216,6 +216,7 @@ MOTOR_GLOW_GAIN = 1.6         # 手の動き（ニューロン集団の活動）
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 720
 WINDOW_TITLE = "BCI Operator"
+FRAME_CAP_FPS = 60            # GPU のときの fps の上限（垂直同期の代わり。gl_backend.FrameLimiter）
 MSAA_SAMPLES = 0              # アンチエイリアス（4 できれい。ソフトウェア描画ではカメラ処理と CPU を取り合い、4 だと描画が約 15 fps に落ちるので 0）
 NEURON_SPHERE_DETAIL = 1      # ニューロンの球の細かさ（アイコスフィアの分割回数）
 ARM_MESH_SEGMENTS = 12        # 円柱の分割数（ロボット・缶・影。少ないほど軽い）

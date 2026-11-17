@@ -23,14 +23,11 @@ import os
 import sys
 import time
 
-# Wayland 環境（Ubuntu の標準）でも安定して動くよう、ウィンドウは X11 互換モード（XWayland）で開く
-# （02_pseudo_bci/main.py と同じ設定）
-#   QT_QPA_PLATFORM        : OpenCV のウィンドウ（Qt）用
-#   PYGLFW_LIBRARY_VARIANT : glfw 用（Wayland 版は GNOME の設定と合わず異常終了することがある）
-#   PYOPENGL_PLATFORM      : PyOpenGL 用（X11 版 glfw に合わせて GLX を使う）
-os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
-os.environ.setdefault("PYGLFW_LIBRARY_VARIANT", "x11")
-os.environ.setdefault("PYOPENGL_PLATFORM", "glx")
+# 描画方式を選ぶ（glfw・PyOpenGL を import する前に）。GPU（Wayland + EGL）が使えれば GPU、
+# だめなら X11 互換モード + ソフトウェア描画。--software で後者を強制する（gl_backend.py）
+import gl_backend    # noqa: E402
+
+gl_backend.setup(force_software="--software" in sys.argv)
 
 import cv2           # noqa: E402
 import glfw          # noqa: E402
@@ -96,9 +93,10 @@ class BrainTest:
         if not self.window:
             raise RuntimeError("ウィンドウを作成できませんでした")
         glfw.make_context_current(self.window)
-        glfw.swap_interval(1)
+        glfw.swap_interval(gl_backend.swap_interval())   # GPU は 0（FrameLimiter で 60 fps に抑える）
         if config.MSAA_SAMPLES > 0:
             gl.glEnable(gl.GL_MULTISAMPLE)
+        print(f"[brain_test] 描画方式 {gl_backend.backend}（{gl_backend.reason}）")
         print(f"[brain_test] {gl.glGetString(gl.GL_RENDERER).decode()}")
         glfw.set_key_callback(self.window, self.on_key)
         glfw.set_mouse_button_callback(self.window, self.on_mouse_button)
@@ -244,7 +242,9 @@ class BrainTest:
         start = prev
         acc, fps = 0.0, 0.0
         try:
+            limiter = gl_backend.FrameLimiter(config.FRAME_CAP_FPS)
             while not glfw.window_should_close(self.window):
+                limiter.wait()
                 now = time.monotonic()
                 dt = now - prev
                 prev = now
@@ -429,6 +429,7 @@ def main():
     parser = argparse.ArgumentParser(description="BCI オペレーター：脳モデルのテスト画面（段階 1）")
     parser.add_argument("--camera", type=int, default=config.CAMERA_INDEX)
     parser.add_argument("--test", action="store_true", help="カメラを使わず、マウスを手の代わりにする")
+    parser.add_argument("--software", action="store_true", help="GPU を使わず、ソフトウェア描画で開く")
     BrainTest(parser.parse_args()).run()
 
 

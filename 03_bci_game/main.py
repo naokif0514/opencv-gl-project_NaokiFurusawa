@@ -20,6 +20,7 @@ BCI オペレーター（ゲーム本体）。実際の BCI 研究の「ハイ�
     ../.venv/bin/python main.py --test     # カメラなし：マウスの位置 = 視線、マウスの動き = 手、クリック = 握る
     ../.venv/bin/python main.py --light    # 軽量モード（config.apply_light_mode）
     ../.venv/bin/python main.py --window   # ディスプレイいっぱいにせず、1280×720 のウィンドウで
+    ../.venv/bin/python main.py --software # GPU を使わず、X11 互換モード + ソフトウェア描画で（以前の方式）
 F11 で全画面 ⇔ ウィンドウを切りかえる。
 """
 
@@ -28,11 +29,11 @@ import os
 import sys
 import time
 
-# Wayland 環境（Ubuntu の標準）でも安定して動くよう、ウィンドウは X11 互換モード（XWayland）で開く
-# （02_pseudo_bci/main.py と同じ設定）
-os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
-os.environ.setdefault("PYGLFW_LIBRARY_VARIANT", "x11")
-os.environ.setdefault("PYOPENGL_PLATFORM", "glx")
+# 描画方式を選ぶ（glfw・PyOpenGL を import する前に）。GPU（Wayland + EGL）が使えれば GPU、
+# だめなら X11 互換モード + ソフトウェア描画。--software で後者を強制する（gl_backend.py）
+import gl_backend    # noqa: E402
+
+gl_backend.setup(force_software="--software" in sys.argv)
 
 import cv2           # noqa: E402
 import glfw          # noqa: E402
@@ -145,7 +146,8 @@ class Game:
         if config.WINDOW_MODE == "maximized":
             glfw.maximize_window(self.window)
         glfw.make_context_current(self.window)
-        glfw.swap_interval(1)
+        glfw.swap_interval(gl_backend.swap_interval())   # GPU は 0（FrameLimiter で 60 fps に抑える）
+        print(f"[main] 描画方式 {gl_backend.backend}（{gl_backend.reason}）")
         print(f"[main] {gl.glGetString(gl.GL_RENDERER).decode()}  描画の解像度 "
               f"{round(W * config.RENDER_SCALE)}×{round(H * config.RENDER_SCALE)}"
               + ("（軽量モード）" if config.LIGHT_MODE else ""))
@@ -295,7 +297,9 @@ class Game:
         start = prev
         acc, fps = 0.0, 0.0
         try:
+            limiter = gl_backend.FrameLimiter(config.FRAME_CAP_FPS)
             while not glfw.window_should_close(self.window):
+                limiter.wait()
                 now = time.monotonic()
                 dt = min(now - prev, 0.1)
                 prev = now
@@ -601,6 +605,8 @@ def main():
     parser.add_argument("--test", action="store_true", help="カメラを使わない（マウスで視線・手・握るの代わり）")
     parser.add_argument("--light", action="store_true", help="軽量モード（重い PC 向け）")
     parser.add_argument("--window", action="store_true", help="1280×720 のウィンドウで開く")
+    parser.add_argument("--software", action="store_true",
+                        help="GPU を使わず、X11 互換モード + ソフトウェア描画で開く（以前の方式）")
     args = parser.parse_args()
     if args.light or config.LIGHT_MODE:
         config.apply_light_mode()

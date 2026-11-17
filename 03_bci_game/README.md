@@ -44,11 +44,13 @@ cd 03_bci_game
 ../.venv/bin/python main.py --test       # カメラなし：マウスの位置 = 視線、マウスの動き = 手、クリック = 握る
 ../.venv/bin/python main.py --light      # 軽量モード（重い PC 向け）
 ../.venv/bin/python main.py --window     # ディスプレイいっぱいにせず 1280×720 のウィンドウで
+../.venv/bin/python main.py --software   # GPU を使わず、X11 互換モード + ソフトウェア描画で（以前の方式）
 ../.venv/bin/python brain_test.py        # 脳モデルのテスト画面（領域の点灯、pial ⇔ inflated の変形）
 ```
 
 ゲームはディスプレイいっぱい（最大化したウィンドウ）で開きます。F11 で全画面 ⇔ ウィンドウを切りかえます。
 カメラが見つからない場合は、自動的にテストモードで起動します。
+起動時に GPU で描けるかを自動で調べ、使えれば GPU、使えなければソフトウェア描画で開きます（8 章「描画方式」）。
 
 ### 初回起動（標準脳データの取得）
 - **初回はネットワーク接続が必要です。** nilearn が Destrieux アトラス（約 180 KB）を NITRC からダウンロードし、
@@ -211,7 +213,28 @@ cd 03_bci_game
 
 ## 8. 処理の重さと軽量モード
 
-ソフトウェア描画（GPU なし、Mesa llvmpipe）の PC で計測：
+### 描画方式（GPU / ソフトウェア描画）（`gl_backend.py`）
+起動時に、別のプロセスで小さなウィンドウを作って GL_RENDERER を調べ（約 0.3 秒）、描画方式を自動で選びます。
+
+| 方式 | ウィンドウ | OpenGL | 選ばれる条件 |
+|---|---|---|---|
+| **GPU** | Wayland のネイティブ（glfw の Wayland 版） | EGL | Wayland のセッションで、テストのウィンドウが作れ、GL_RENDERER がソフトウェア描画でない |
+| ソフトウェア描画 | X11 互換モード（XWayland） | GLX | `--software`、Wayland でない、GPU のテストに失敗 |
+
+- 以前は X11 互換モードで開いていたが、XWayland が DRI3 に対応していないため、Intel の GPU があっても CPU で描くソフトウェア描画（llvmpipe）になっていた
+- Wayland 版の glfw が落ちていた原因は、窓枠を描く libdecor の GTK プラグインが GNOME の設定のキー（`antialiasing`）を見つけられずに異常終了することだった。GTK プラグインを読まないよう `LIBDECOR_PLUGIN_DIR` を指定している。cairo プラグイン（`libdecor-0-plugin-1-cairo`）が入っていなければ **窓枠なし** で開く（ESC で終了、F11 で全画面）
+- Wayland では、ウィンドウが見えていない（最小化・ほかのワークスペースなど）あいだ、垂直同期つきの画面の切りかえが返ってこず、ゲームが止まる（実際に確認）。GPU のときは垂直同期を使わず、60 fps（`FRAME_CAP_FPS`）に自分で抑える
+- 環境変数 `PYGLFW_LIBRARY_VARIANT`（`x11` / `wayland`）を設定すると、自動の判定より優先される
+
+プレイ画面の fps（自動プレイ、20 秒の平均。Intel Arrow Lake-U、Mesa 25.2.8、`RENDER_SCALE = 1.25`）：
+
+| 条件 | ソフトウェア描画（以前） | GPU |
+|---|---|---|
+| テストモード | 約 21〜22 fps | **約 60 fps**（上限） |
+| カメラモード（カメラ・MediaPipe を動かしたまま） | 約 18〜28 fps | **約 58 fps**（上限 60） |
+| 上限を外したとき（テスト / カメラ） | 約 22 fps / — | 約 417 fps / 約 198 fps |
+
+以下は、ソフトウェア描画（GPU なし、Mesa llvmpipe）の PC で計測した値：
 
 | 設定 | 3D を描く解像度 | 描画（カメラモード、プレイ中） | カメラ処理 |
 |---|---|---|---|
@@ -260,6 +283,7 @@ cd 03_bci_game
 | `brain_record.py` | 結果画面の振り返り用の記録（領域の使われ方、ラスター、精度の推移、イベント） | 新規 |
 | `layout.py` | 画面の配置（同期パッド、視線同期の点） | 新規 |
 | `render_target.py` | 決まった解像度のオフスクリーンに描いて、ウィンドウいっぱいへ拡大 | 新規 |
+| `gl_backend.py` | 描画方式の自動選択（GPU = Wayland + EGL / ソフトウェア描画 = X11 + GLX）、fps の上限 | 新規 |
 | `vision.py` | カメラ処理スレッド（Hands・Face Mesh・色の検出、小さなカメラ映像） | 新規（手の速度は hand_tracker.py を利用） |
 | `gaze.py` | 視線同期、平滑化、固視フィルタ、ずれの補正、吸い付き + ドウェル選択 | 新規 |
 | `items.py` | 現実の色の物の追跡（ボーナスのきっかけ） | 新規 |
