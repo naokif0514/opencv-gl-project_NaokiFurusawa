@@ -30,3 +30,20 @@ fps（カメラモード、上限 60）：変更前 58、light（ソフトウェ
 | `stageC_5_compare_closeup.png` | 拡大の比較（左 = 変更前、右 = 変更後） |
 
 fps（カメラモード、上限 60）：light（ソフトウェア描画）約 26（段階 B では約 27）、standard 58、high 58。
+
+## 物とカゴの作り込み（段階 D の前）
+
+物とカゴを、`tools/make_item_models.py` で組み立てた自作のモデル `assets/models/items.obj` に置きかえた（画質 standard / high のみ。light は以前の簡単な形のまま）。
+大きさ・高さは以前の形と同じなので、視線で選ぶときの投影・吸い付く範囲、つかむ判定は変わらない。
+どの画像もボーナスを 1 個置いた状態で撮った。
+
+| ファイル | 内容 |
+|---|---|
+| `items_0_before_standard.png` | 変更前（画質 standard）：箱 = 立方体、缶 = 円柱、玉 = 球、ボーナス = 立方体 2 つ、カゴ = 板の箱 |
+| `items_1_after_standard.png` | 変更後（画質 standard） |
+| `items_2_before_closeup.png` | 変更前（拡大、画質 high） |
+| `items_3_after_closeup_high.png` | 変更後（拡大、画質 high）：テープ・ラベルつきの段ボール箱、ふち・プルタブ・ラベルの帯つきの缶、縫い目つきのボール、ふくらんだ星 + 回る輪 + 光の粒 + ぼんやりした光、網目とふちのカゴ |
+| `items_4_after_light.png` | 変更後の画質 light（以前の簡単な形のまま） |
+| `items_5_compare_closeup.png` | 拡大の比較（左 = 変更前、右 = 変更後） |
+
+fps（テストモード、上限なし、変更前と後を交互に 2 回ずつ測った平均）：standard 約 186 → 約 143、high 約 147 → 約 130（上限 60 には十分余裕がある）。

@@ -13,6 +13,7 @@ scene3d.py
 """
 
 import math
+import os
 
 import numpy as np
 from OpenGL import GL as gl
@@ -20,7 +21,7 @@ from OpenGL import GL as gl
 import config
 from gfx2d import rotate_z, scale, translate
 from gl_utils import ShaderProgram, look_at, perspective
-from robot_view import Meshes, RobotView, rotate_y
+from robot_view import Meshes, RobotView, load_obj, rotate_y
 
 LIGHT_DIR = np.array([-0.45, 1.0, 0.55])
 BASKET_COLOR = (0.75, 0.45, 0.18)
@@ -29,6 +30,7 @@ BASKET_COLOR = (0.75, 0.45, 0.18)
 # light（以前のシェーダー）では使わず、draw() の spec だけを使う
 MATERIALS = {
     "matte":    (0.15, 10.0, 0.0),    # つやなし（ゴム・床）
+    "cardboard": (0.22, 14.0, 0.0),   # 段ボール（箱）
     "wood":     (0.30, 24.0, 0.0),    # 机（ニス塗りの木）
     "painted":  (0.45, 32.0, 0.0),    # 塗装（カゴ）
     "plastic":  (0.60, 48.0, 0.0),    # プラスチック（箱）
@@ -39,6 +41,35 @@ MATERIALS = {
     "gold":     (1.00, 90.0, 1.00),   # 金（ボーナス）
 }
 
+ITEM_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "models", "items.obj")
+
+# 物とカゴのモデル（assets/models/items.obj。tools/make_item_models.py で生成）の役割ごとの見た目：
+#   役割 → (色（None = 物の種類の色）, 質感（None = 物の種類の finish）, 発光)
+ITEM_PARTS = {
+    "main":   (None, None, 0.0),
+    "tape":   ((0.86, 0.72, 0.48), "glossy", 0.0),     # 箱：茶色の梱包テープ
+    "label":  ((0.93, 0.93, 0.90), "painted", 0.0),    # 箱：白いラベル
+    "print":  ((0.10, 0.12, 0.16), "matte", 0.0),      # 箱：印刷の印、缶：飲み口の線
+    "band":   ((0.95, 0.96, 0.97), "painted", 0.0),    # 缶：白いラベルの帯
+    "metal":  ((0.78, 0.80, 0.84), "steel", 0.0),      # 缶：ふち・ふた
+    "tab":    ((0.82, 0.84, 0.88), "steel", 0.0),      # 缶：プルタブ
+    "seam":   ((0.97, 0.96, 0.92), "matte", 0.0),      # 玉：縫い目
+    "core":   ((1.00, 0.95, 0.70), "gold", 1.4),       # ボーナス：光る芯
+    "ring":   ((1.00, 0.85, 0.40), "gold", 0.9),       # ボーナス：まわりを回る輪
+    "frame":  (None, "gunmetal", 0.0),                 # カゴ：枠（色は BASKET_COLOR_HQ）
+    "mesh":   ((0.50, 0.56, 0.64), "steel", 0.0),      # カゴ：網目
+    "bottom": (None, "painted", 0.0),                  # カゴ：底（色は BASKET_COLOR_HQ の暗い色）
+    "rim":    (None, "plastic", 0.6),                  # カゴ：上のふちの光る線（色は BASKET_RIM_HQ）
+}
+
+
+def rotate_x(a):
+    m = np.identity(4, dtype=np.float32)
+    c, s = math.cos(a), math.sin(a)
+    m[1, 1], m[1, 2], m[2, 1], m[2, 2] = c, -s, s, c
+    return m
+
+
 class Scene3D:
     def __init__(self, rng):
         self.rng = rng
@@ -46,6 +77,8 @@ class Scene3D:
         self.shader = ShaderProgram("scene.vert", "scene_hq.frag" if self.full else "scene.frag")
         self.meshes = Meshes()
         self.robot_view = RobotView(self)
+        # 画質 standard / high では作り込んだ物・カゴのモデル、light では以前の簡単な形（重さを変えないため）
+        self.item_models = load_obj(ITEM_MODEL_PATH) if self.full else None
         self.follow = np.zeros(3)
         self.shake_t = 0.0
         self.shake_amp = 0.0
@@ -125,8 +158,73 @@ class Scene3D:
         self.draw(self.meshes.cyl, m, np.identity(4, dtype=np.float32), (0, 0, 0),
                   alpha=config.SHADOW_ALPHA * strength)
 
+    def _model_parts(self, name, M, rot, item_color=None, item_finish="plastic", glow=0.0, skip=()):
+        """items.obj の部品を描く（役割ごとの色・質感は ITEM_PARTS。skip の役割は描かない）"""
+        for role, mesh in self.item_models[name]:
+            if role in skip:
+                continue
+            color, material, emissive = ITEM_PARTS[role]
+            if role == "main":
+                color, material, emissive = item_color, item_finish, glow
+            elif name == "basket":
+                if role == "frame":
+                    color = config.BASKET_COLOR_HQ
+                elif role == "bottom":
+                    color = tuple(v * 0.55 for v in config.BASKET_COLOR_HQ)
+                elif role == "rim":
+                    color = config.BASKET_RIM_HQ
+            self.draw(mesh, M, rot, color, emissive=emissive, material=material)
+
+    def _item_model(self, it, t, selected):
+        """作り込んだモデルで物を描く（大きさ・高さは以前の簡単な形と同じ）"""
+        spec = it.spec
+        r = spec["radius"]
+        glow = 0.35 if selected else 0.0
+        name = {"cube": "box", "cylinder": "can", "sphere": "ball", "star": "bonus"}[spec["shape"]]
+        S = scale(r, r, r)
+        if name == "bonus":                     # 回りながら上下にゆれる。輪は傾けて別に回す
+            bob = 0.12 * math.sin(t * 2.6 + it.id)
+            rot = rotate_y(it.angle + t * 1.6)
+            base = translate(*self.to3d(it.pos, it.height + bob * r))
+            pulse = 0.5 + 0.5 * math.sin(t * 5)
+            self._model_parts("bonus", base @ rot @ S, rot, spec["rgb"], "gold", 0.12 + 0.18 * pulse + glow,
+                              skip=("ring",))
+            rr = rotate_y(t * 2.4) @ rotate_x(0.5) @ rotate_y(-t * 3.0)
+            ring = base @ translate(0, 1.3 * r, 0) @ rr @ translate(0, -1.3 * r, 0) @ S
+            for role, mesh in self.item_models["bonus"]:
+                if role == "ring":
+                    color, material, emissive = ITEM_PARTS["ring"]
+                    self.draw(mesh, ring, rr, color, emissive=emissive + 0.4 * pulse, material=material)
+            return
+        rot = rotate_y(it.angle)
+        M = translate(*self.to3d(it.pos, it.height)) @ rot @ S
+        self._model_parts(name, M, rot, spec["rgb"], spec.get("finish", "plastic"), glow)
+
+    def _bonus_glow(self, it, t):
+        """ボーナスの光（加算合成）：まわりのぼんやりした光と、立ちのぼって消えていく光の粒"""
+        r = it.spec["radius"]
+        pulse = 0.5 + 0.5 * math.sin(t * 5)
+        c = self.to3d(it.pos, it.height + 1.3 * r)
+        gold = (1.0, 0.78, 0.30)
+        I = np.identity(4, dtype=np.float32)
+        for size, a in ((1.4, 0.08), (1.75, 0.06), (2.15, 0.045), (2.6, 0.033), (3.1, 0.022), (3.7, 0.014)):
+            # 外ほど薄い光の玉を重ねる（ぼかしの代わり）
+            s = r * size * (1.0 + 0.08 * pulse)
+            self.draw(self.meshes.sph, translate(*c) @ scale(s, s, s), I, gold, alpha=a * (0.7 + 0.3 * pulse),
+                      emissive=2.5, material="matte")
+        # 星のまわりから立ちのぼって消えていく光の粒（8 個）
+        for k in range(8):
+            ph = (t * 0.55 + k / 8) % 1.0
+            ang = k * 2.4 + t * 0.8
+            p = np.array(c) + np.array([math.cos(ang) * 1.1 * r, (ph * 3.2 - 1.2) * r, math.sin(ang) * 1.1 * r])
+            sz = r * 0.13 * (1.0 - 0.5 * ph)
+            self.draw(self.meshes.sph, translate(*p) @ scale(sz, sz, sz), I, (1.0, 0.92, 0.6),
+                      alpha=0.9 * math.sin(math.pi * ph), emissive=2.5, material="matte")
+
     def _item(self, it, t, selected=False):
         """物を 1 個描く（種類ごとの形）。つかまれている物は呼び出し側で位置・高さを決める"""
+        if self.item_models is not None:
+            return self._item_model(it, t, selected)
         spec = it.spec
         r = spec["radius"]
         h = it.height
@@ -163,6 +261,10 @@ class Scene3D:
         th = 0.006
         c = self.to3d(g, 0.004)
         I = np.identity(4, dtype=np.float32)
+        if self.item_models is not None:      # 作り込んだカゴ（網目・ふち・光る線）
+            g3 = self.to3d(np.asarray(config.GOAL_POS), 0.0)
+            self._model_parts("basket", translate(*g3), np.identity(4, dtype=np.float32))
+            return
         wall = config.BASKET_COLOR_HQ if self.full else BASKET_COLOR
         bottom = tuple(v * 0.55 for v in config.BASKET_COLOR_HQ) if self.full else (0.35, 0.22, 0.10)
         self.draw(self.meshes.cube, translate(*c) @ scale(R, 0.004, R), I, bottom, material="painted")
@@ -251,5 +353,17 @@ class Scene3D:
             held.height = RobotView.ARM_HEIGHT - held.radius * 1.2
             self._item(held, t)
             held.height = saved
+
+        # ---- ボーナスの光（加算合成。深度は書かない）----
+        if self.item_models is not None:
+            bonus = [it for it in items if it.type == "bonus" and not it.held]
+            if bonus:
+                gl.glEnable(gl.GL_BLEND)
+                gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE)
+                gl.glDepthMask(gl.GL_FALSE)
+                for it in bonus:
+                    self._bonus_glow(it, t)
+                gl.glDepthMask(gl.GL_TRUE)
+                gl.glDisable(gl.GL_BLEND)
         gl.glBindVertexArray(0)
         gl.glDisable(gl.GL_DEPTH_TEST)
