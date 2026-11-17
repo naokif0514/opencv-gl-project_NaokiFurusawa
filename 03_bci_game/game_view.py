@@ -130,7 +130,8 @@ class GameView:
     def render(self, t, dt, gaze, fps):
         g = self.g
         self.rt.bind()
-        gl.glClearColor(0.035, 0.04, 0.06, 1.0)
+        bg = config.SCENE_BG if config.SCENE_SHADING == "full" else (0.035, 0.04, 0.06)   # 3D の背景（遠くの色）
+        gl.glClearColor(*bg, 1.0)
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
         self._full_viewport()
 

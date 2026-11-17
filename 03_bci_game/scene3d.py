@@ -25,11 +25,25 @@ from robot_view import Meshes, RobotView, rotate_y
 LIGHT_DIR = np.array([-0.45, 1.0, 0.55])
 BASKET_COLOR = (0.75, 0.45, 0.18)
 
+# 質感（画質 standard / high の新しいシェーダー用）：名前 → (鏡面反射の強さ, 鋭さ, 金属らしさ)
+# light（以前のシェーダー）では使わず、draw() の spec だけを使う
+MATERIALS = {
+    "matte":    (0.15, 10.0, 0.0),    # つやなし（ゴム・床）
+    "wood":     (0.30, 24.0, 0.0),    # 机（ニス塗りの木）
+    "painted":  (0.45, 32.0, 0.0),    # 塗装（カゴ）
+    "plastic":  (0.60, 48.0, 0.0),    # プラスチック（箱）
+    "glossy":   (0.90, 120.0, 0.0),   # つやつや（玉）
+    "anodized": (0.80, 70.0, 0.55),   # アルマイト（缶・関節）：色のついた金属
+    "gunmetal": (0.80, 50.0, 0.80),   # 暗い金属（ロボットの台座）
+    "steel":    (1.00, 80.0, 1.00),   # 鋼（アーム・指）
+    "gold":     (1.00, 90.0, 1.00),   # 金（ボーナス）
+}
 
 class Scene3D:
     def __init__(self, rng):
         self.rng = rng
-        self.shader = ShaderProgram("scene.vert", "scene.frag")
+        self.full = config.SCENE_SHADING == "full"
+        self.shader = ShaderProgram("scene.vert", "scene_hq.frag" if self.full else "scene.frag")
         self.meshes = Meshes()
         self.robot_view = RobotView(self)
         self.follow = np.zeros(3)
@@ -80,14 +94,25 @@ class Scene3D:
         return float(np.linalg.norm(b - a)) if a is not None and b is not None else 20.0
 
     # --------------------------------------------------------
-    def draw(self, mesh, model, rot, color, alpha=1.0, emissive=0.0, spec=0.15):
+    def draw(self, mesh, model, rot, color, alpha=1.0, emissive=0.0, spec=0.15, material="matte", wood=False):
+        """
+        spec：以前のシェーダー（画質 light）の鏡面反射の強さ。
+        material・wood：新しいシェーダー（standard / high）の質感（MATERIALS の名前）と、木目にするか
+        """
         s = self.shader
         s.set_mat4("uModel", model)
         s.set_mat4("uRot", rot)
         s.set_vec3("uColor", color)
         s.set_float("uAlpha", alpha)
         s.set_float("uEmissive", emissive)
-        s.set_float("uSpec", spec)
+        if self.full:
+            sp, shine, metal = MATERIALS[material]
+            s.set_float("uSpec", sp)
+            s.set_float("uShine", shine)
+            s.set_float("uMetal", metal)
+            s.set_int("uMat", 1 if wood else 0)
+        else:
+            s.set_float("uSpec", spec)
         gl.glBindVertexArray(mesh[0])
         gl.glDrawElements(gl.GL_TRIANGLES, mesh[1], gl.GL_UNSIGNED_INT, None)
 
@@ -108,25 +133,27 @@ class Scene3D:
         rot = rotate_y(it.angle)
         glow = 0.35 if selected else 0.0
         shape = spec["shape"]
+        mat = spec.get("finish", "plastic")
         if shape == "cube":
             c = self.to3d(it.pos, h + r * 0.85)
             self.draw(self.meshes.cube, translate(*c) @ rot @ scale(r * 0.85, r * 0.85, r * 0.85), rot, spec["rgb"],
-                      emissive=glow, spec=0.2)
+                      emissive=glow, spec=0.2, material=mat)
         elif shape == "cylinder":
             c = self.to3d(it.pos, h)
             m = translate(*c) @ rot @ rotate_z(math.pi / 2) @ scale(r * 2.6, r, r)
-            self.draw(self.meshes.cyl, m, rot @ rotate_z(math.pi / 2), spec["rgb"], emissive=glow, spec=0.7)
+            self.draw(self.meshes.cyl, m, rot @ rotate_z(math.pi / 2), spec["rgb"], emissive=glow, spec=0.7,
+                      material=mat)
         elif shape == "sphere":
             c = self.to3d(it.pos, h + r)
             self.draw(self.meshes.sph, translate(*c) @ scale(r, r, r), np.identity(4, dtype=np.float32), spec["rgb"],
-                      emissive=glow, spec=0.8)
+                      emissive=glow, spec=0.8, material=mat)
         else:   # star：金色に光り、ゆっくり回る（立方体 2 つを 45° ずらして重ねる）
             c = self.to3d(it.pos, h + r * 1.1)
             pulse = 0.35 + 0.25 * math.sin(t * 5)
             for k in range(2):
                 rr = rotate_y(it.angle + t * 1.5 + k * math.pi / 4) @ rotate_z(math.pi / 4)
                 self.draw(self.meshes.cube, translate(*c) @ rr @ scale(r, r * 0.35, r), rr, spec["rgb"],
-                          emissive=pulse + glow, spec=0.9)
+                          emissive=(pulse + glow) * (0.6 if self.full else 1.0), spec=0.9, material=mat)
 
     def _basket(self):
         """ゴールのカゴ：底と 4 枚の壁（上が開いた箱）"""
@@ -136,26 +163,50 @@ class Scene3D:
         th = 0.006
         c = self.to3d(g, 0.004)
         I = np.identity(4, dtype=np.float32)
-        self.draw(self.meshes.cube, translate(*c) @ scale(R, 0.004, R), I, (0.35, 0.22, 0.10))
+        wall = config.BASKET_COLOR_HQ if self.full else BASKET_COLOR
+        bottom = tuple(v * 0.55 for v in config.BASKET_COLOR_HQ) if self.full else (0.35, 0.22, 0.10)
+        self.draw(self.meshes.cube, translate(*c) @ scale(R, 0.004, R), I, bottom, material="painted")
         for dx, dz, sx, sz in ((R, 0, th, R), (-R, 0, th, R), (0, R, R, th), (0, -R, R, th)):
             cc = c + np.array([dx, hgt / 2, dz])
-            self.draw(self.meshes.cube, translate(*cc) @ scale(sx, hgt / 2, sz), I, BASKET_COLOR, spec=0.2)
+            self.draw(self.meshes.cube, translate(*cc) @ scale(sx, hgt / 2, sz), I, wall, spec=0.2,
+                      material="gunmetal")
+            if self.full:                          # 上の縁の発光ライン（ゴールの目印）
+                rc = c + np.array([dx, hgt + 0.001, dz])
+                self.draw(self.meshes.cube, translate(*rc) @ scale(max(sx * 0.6, 0.0035) if sx < R else sx, 0.001,
+                                                                  max(sz * 0.6, 0.0035) if sz < R else sz), I,
+                          config.BASKET_RIM_HQ, emissive=0.6, material="plastic")
 
     def _table(self):
         I = np.identity(4, dtype=np.float32)
         m = 0.07
         self.draw(self.meshes.cube, translate(0, -0.03, 0) @ scale(config.WORLD_W / 2 + m, 0.03, config.WORLD_H / 2 + m),
-                  I, config.TABLE_COLOR, spec=0.08)
-        # 机の上の薄い格子（距離感をつかみやすくする）
-        col = tuple(min(1.0, c * 1.25) for c in config.TABLE_COLOR)
+                  I, config.TABLE_COLOR_HQ if self.full else config.TABLE_COLOR, spec=0.08, material="wood", wood=True)
+        # 机の上の薄い格子（距離感をつかみやすくする。新しいシェーダーでは木目を邪魔しないよう暗い細い線）
+        col = tuple(c * 0.70 for c in config.TABLE_COLOR_HQ) if self.full else \
+            tuple(min(1.0, c * 1.25) for c in config.TABLE_COLOR)
+        gw = 0.0009 if self.full else 0.0015      # 線の太さの半分
         for k in range(1, 8):
             x = -config.WORLD_W / 2 + config.WORLD_W * k / 8
-            self.draw(self.meshes.cube, translate(x, 0.0003, 0) @ scale(0.0015, 0.0003, config.WORLD_H / 2), I, col)
+            self.draw(self.meshes.cube, translate(x, 0.0003, 0) @ scale(gw, 0.0003, config.WORLD_H / 2), I, col)
         for k in range(1, 6):
             z = -config.WORLD_H / 2 + config.WORLD_H * k / 6
-            self.draw(self.meshes.cube, translate(0, 0.0003, z) @ scale(config.WORLD_W / 2, 0.0003, 0.0015), I, col)
+            self.draw(self.meshes.cube, translate(0, 0.0003, z) @ scale(config.WORLD_W / 2, 0.0003, gw), I, col)
         # 床（机の下、遠くまで）
-        self.draw(self.meshes.cube, translate(0, -0.75, 0) @ scale(4.0, 0.01, 4.0), I, (0.10, 0.11, 0.15))
+        self.draw(self.meshes.cube, translate(0, -0.75, 0) @ scale(4.0, 0.01, 4.0), I,
+                  config.SCENE_FLOOR if self.full else (0.10, 0.11, 0.15))
+
+    @staticmethod
+    def _set_lights(s):
+        """新しいシェーダーの光（config の KEY / FILL / RIM_LIGHT、環境光、フォグ）。色は線形にせず sRGB のまま渡し、
+        強さだけ掛ける（シェーダーで線形にするのは物の色だけ。光の色は見た目で調整した値）"""
+        for name, (d, col, k) in (("Key", config.KEY_LIGHT), ("Fill", config.FILL_LIGHT), ("Rim", config.RIM_LIGHT)):
+            s.set_vec3(f"u{name}Dir", d)
+            s.set_vec3(f"u{name}Col", tuple(c * k for c in col))
+        s.set_vec3("uSkyCol", tuple(c * config.SKY_AMBIENT[1] for c in config.SKY_AMBIENT[0]))
+        s.set_vec3("uGroundCol", tuple(c * config.GROUND_AMBIENT[1] for c in config.GROUND_AMBIENT[0]))
+        s.set_vec3("uFogCol", config.SCENE_BG)
+        s.set_vec2("uFogRange", config.FOG_RANGE)
+        s.set_float("uExposure", config.EXPOSURE)
 
     # --------------------------------------------------------
     def render(self, viewport, robot, items, held, t, dt, selected=None):
@@ -169,6 +220,8 @@ class Scene3D:
         s.set_mat4("uProj", self.proj)
         s.set_vec3("uLightDir", LIGHT_DIR)
         s.set_vec3("uCamPos", self.eye)
+        if self.full:
+            self._set_lights(s)
 
         self._table()
         self._basket()

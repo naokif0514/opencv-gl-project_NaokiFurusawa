@@ -18,7 +18,8 @@ BCI オペレーター（ゲーム本体）。実際の BCI 研究の「ハイ�
     cd 03_bci_game
     ../.venv/bin/python main.py            # カメラ（視線 + 右手 + 色の物）
     ../.venv/bin/python main.py --test     # カメラなし：マウスの位置 = 視線、マウスの動き = 手、クリック = 握る
-    ../.venv/bin/python main.py --light    # 軽量モード（config.apply_light_mode）
+    ../.venv/bin/python main.py --quality high   # 画質（light / standard / high。既定は GPU なら standard）
+    ../.venv/bin/python main.py --light    # さらに軽く（画質 light + config.apply_light_mode）
     ../.venv/bin/python main.py --window   # ディスプレイいっぱいにせず、1280×720 のウィンドウで
     ../.venv/bin/python main.py --no-degrade  # 電極劣化なし（ノーマル）で始める（タイトルの M / ← → でも切りかえ）
     ../.venv/bin/python main.py --software # GPU を使わず、X11 互換モード + ソフトウェア描画で（以前の方式）
@@ -150,8 +151,9 @@ class Game:
         glfw.make_context_current(self.window)
         glfw.swap_interval(gl_backend.swap_interval())   # GPU は 0（FrameLimiter で 60 fps に抑える）
         print(f"[main] 描画方式 {gl_backend.backend}（{gl_backend.reason}）")
-        print(f"[main] {gl.glGetString(gl.GL_RENDERER).decode()}  描画の解像度 "
-              f"{round(W * config.RENDER_SCALE)}×{round(H * config.RENDER_SCALE)}"
+        print(f"[main] {gl.glGetString(gl.GL_RENDERER).decode()}  画質 {config.QUALITY_ACTIVE}"
+              f"（{config.QUALITY_NAME_JA[config.QUALITY_ACTIVE]}）  描画の解像度 "
+              f"{round(W * config.RENDER_SCALE)}×{round(H * config.RENDER_SCALE)}  MSAA {config.MSAA_SAMPLES}"
               + ("（軽量モード）" if config.LIGHT_MODE else ""))
         glfw.set_key_callback(self.window, self.on_key)
         glfw.set_mouse_button_callback(self.window, self.on_mouse_button)
@@ -624,7 +626,10 @@ def main():
     parser = argparse.ArgumentParser(description="BCI オペレーター")
     parser.add_argument("--camera", type=int, default=config.CAMERA_INDEX)
     parser.add_argument("--test", action="store_true", help="カメラを使わない（マウスで視線・手・握るの代わり）")
-    parser.add_argument("--light", action="store_true", help="軽量モード（重い PC 向け）")
+    parser.add_argument("--quality", choices=("auto", "light", "standard", "high"), default=None,
+                        help="画質（auto = GPU なら standard、ソフトウェア描画なら light）")
+    parser.add_argument("--light", action="store_true",
+                        help="さらに軽くする（重い PC 向け。画質は light にしたうえで解像度・カメラ処理も減らす）")
     parser.add_argument("--window", action="store_true", help="1280×720 のウィンドウで開く")
     parser.add_argument("--no-degrade", action="store_true",
                         help="電極劣化なし（ノーマル）で始める（タイトル画面でも切りかえられる）")
@@ -633,6 +638,12 @@ def main():
     args = parser.parse_args()
     if args.no_degrade:
         config.DEGRADE_ENABLED = False
+    quality = args.quality or config.QUALITY
+    if args.light or config.LIGHT_MODE:
+        quality = "light"
+    if quality == "auto":
+        quality = "standard" if gl_backend.backend == "gpu" else "light"
+    config.apply_quality(quality)
     if args.light or config.LIGHT_MODE:
         config.apply_light_mode()
     if args.window:

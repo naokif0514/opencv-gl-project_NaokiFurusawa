@@ -84,11 +84,11 @@ def make_mesh(verts, idx):
 
 
 class Meshes:
-    """場面で共有するメッシュ（ポリゴン数は少なめ：円柱 12 分割、球 80 三角形）"""
+    """場面で共有するメッシュ（細かさは画質の段階で変わる：円柱 ARM_MESH_SEGMENTS 分割、球 SPHERE_SUBDIV 回分割）"""
 
     def __init__(self):
         self.cyl = make_mesh(*cylinder_mesh(config.ARM_MESH_SEGMENTS))
-        sv, si = icosphere(1)
+        sv, si = icosphere(config.SPHERE_SUBDIV)
         self.sph = make_mesh(np.hstack([sv, sv]).astype(np.float32), si)
         self.cube = make_mesh(*cube_mesh())
 
@@ -106,14 +106,14 @@ class RobotView:
     def __init__(self, scene):
         self.s = scene
 
-    def _link(self, p0, p1, r, color, h):
+    def _link(self, p0, p1, r, color, h, material="steel"):
         """ワールド座標の 2 点を、高さ h で結ぶ円柱"""
         s = self.s
         a, b = s.to3d(p0, h), s.to3d(p1, h)
         d = b - a
         length = float(np.hypot(d[0], d[2]))
         rot = rotate_y(math.atan2(-d[2], d[0]))
-        s.draw(s.meshes.cyl, translate(*a) @ rot @ scale(length, r, r), rot, color, spec=0.6)
+        s.draw(s.meshes.cyl, translate(*a) @ rot @ scale(length, r, r), rot, color, spec=0.6, material=material)
 
     def draw(self, robot):
         s = self.s
@@ -123,25 +123,26 @@ class RobotView:
         rot = rotate_y(f)
         # ---- 台座 ----
         c = s.to3d(robot.pos, 0.032)
-        s.draw(s.meshes.cube, translate(*c) @ rot @ scale(L / 2, 0.022, Wd / 2), rot, self.BODY_COLOR, spec=0.3)
+        s.draw(s.meshes.cube, translate(*c) @ rot @ scale(L / 2, 0.022, Wd / 2), rot, self.BODY_COLOR, spec=0.3,
+               material="gunmetal")
         fr = s.to3d(robot.pos + fw * L * 0.42, 0.05)
         s.draw(s.meshes.cube, translate(*fr) @ rot @ scale(0.008, 0.006, Wd * 0.42), rot, self.ACCENT_COLOR,
-               emissive=0.6)
+               emissive=0.6, material="plastic")
         axle = rotate_y(f + math.pi / 2)              # 車輪（車軸は台座の左右方向）
         for sx in (-0.3, 0.3):
             for sy in (-1, 1):
                 w = robot.pos + fw * L * sx + side * sy * (Wd / 2) - side * 0.007
                 s.draw(s.meshes.cyl, translate(*s.to3d(w, 0.016)) @ axle @ scale(0.014, 0.016, 0.016), axle,
-                       self.WHEEL_COLOR)
+                       self.WHEEL_COLOR, material="matte")
 
         # ---- アーム（机と平行な高さ ARM_HEIGHT の平面で動く）----
         pose = robot.pose
         h = self.ARM_HEIGHT
         s.draw(s.meshes.cyl, translate(*s.to3d(pose.base, 0.05)) @ rotate_z(math.pi / 2) @ scale(h - 0.05, 0.014, 0.014),
-               np.identity(4, dtype=np.float32), self.LINK_COLOR)      # 肩の柱
+               np.identity(4, dtype=np.float32), self.LINK_COLOR, material="steel")      # 肩の柱
         for p, r in ((pose.base, 0.020), (pose.elbow, 0.016), (pose.hand, 0.012)):
             s.draw(s.meshes.sph, translate(*s.to3d(p, h)) @ scale(r, r, r), np.identity(4, dtype=np.float32),
-                   self.JOINT_COLOR, spec=0.5)
+                   self.JOINT_COLOR, spec=0.5, material="anodized")
         self._link(pose.base, pose.elbow, 0.011, self.LINK_COLOR, h)
         self._link(pose.elbow, pose.hand, 0.009, self.LINK_COLOR, h)
         # グリッパー：前腕の向きから、開き具合に応じた角度で 2 本の指を出し、先を少し下へ

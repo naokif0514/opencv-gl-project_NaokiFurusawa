@@ -129,14 +129,14 @@ GAME_NOISE_TYPE = "drift"     # ノイズの種類（neuron_model.py）
 
 # 物の種類：形・色・大きさ（半径、ワールド座標）・基本点・出やすさ。小さい物ほど高得点
 ITEM_TYPES = {
-    "box":   {"shape": "cube",     "rgb": (0.25, 0.55, 1.00), "radius": 0.036, "points": 100, "weight": 0.5,
-              "name": "箱"},
-    "can":   {"shape": "cylinder", "rgb": (0.30, 0.85, 0.40), "radius": 0.028, "points": 150, "weight": 0.3,
-              "name": "缶"},
-    "ball":  {"shape": "sphere",   "rgb": (1.00, 0.85, 0.20), "radius": 0.020, "points": 250, "weight": 0.2,
-              "name": "玉"},
-    "bonus": {"shape": "star",     "rgb": (1.00, 0.70, 0.15), "radius": 0.030, "points": 500, "weight": 0.0,
-              "name": "ボーナス"},
+    "box":   {"shape": "cube",     "rgb": (0.22, 0.50, 1.00), "radius": 0.036, "points": 100, "weight": 0.5,
+              "name": "箱", "finish": "plastic"},
+    "can":   {"shape": "cylinder", "rgb": (0.25, 0.85, 0.42), "radius": 0.028, "points": 150, "weight": 0.3,
+              "name": "缶", "finish": "anodized"},
+    "ball":  {"shape": "sphere",   "rgb": (1.00, 0.24, 0.30), "radius": 0.020, "points": 250, "weight": 0.2,
+              "name": "玉", "finish": "glossy"},
+    "bonus": {"shape": "star",     "rgb": (1.00, 0.72, 0.18), "radius": 0.030, "points": 500, "weight": 0.0,
+              "name": "ボーナス", "finish": "gold"},
 }
 FIELD_START_ITEMS = 6         # 最初に置く物の数（少なめにして、視線の吸い付き先を迷わないようにする）
 FIELD_MAX_ITEMS = 7           # フィールドに同時に置く物の上限（ボーナスは含まない）
@@ -248,7 +248,51 @@ WINDOW_MODE = "maximized"     # "maximized"（ディスプレイいっぱいの�
 RENDER_SCALE = 1.25           # 3D・図形を描く解像度 = 1280×720 × この値（文字は常に実際の画面の解像度で描く）。
                               # 実測（カメラモード）：1.0 → 約 33 fps、1.25 → 約 31 fps、1.5 → 約 22 fps
 
+# ---- 画質の 3 段階（apply_quality）----
+#   "light"（軽量）   : ソフトウェア描画向け。以前と同じ重さ（同じ解像度・同じ簡単なシェーダー）
+#   "standard"（標準）: GPU 向け。カメラモードで 60 fps を保てる範囲で見た目を上げる
+#   "high"（高画質）  : 発表のデモ用の最高設定（カメラモードで 45 fps 以上が目安）
+#   "auto"            : GPU が使えれば standard、ソフトウェア描画なら light（main.py の --quality で上書き）
+QUALITY = "auto"
+QUALITY_PRESETS = {
+    #            描く解像度の倍率, MSAA, シェーダー（basic = 以前のもの / full = 新しいもの）, 円柱の分割数, 球の細かさ
+    "light":    {"render_scale": 1.25, "msaa": 0, "shading": "basic", "segments": 12, "sphere": 1},
+    "standard": {"render_scale": 1.5,  "msaa": 4, "shading": "full",  "segments": 24, "sphere": 2},
+    "high":     {"render_scale": 2.0,  "msaa": 8, "shading": "full",  "segments": 40, "sphere": 3},
+}
+QUALITY_NAME_JA = {"light": "軽量", "standard": "標準", "high": "高画質"}
+QUALITY_ACTIVE = "light"      # 実際に選ばれた段階（apply_quality で決まる）
+SCENE_SHADING = "basic"       # 3D の場面のシェーダー（apply_quality で決まる）
+SPHERE_SUBDIV = 1             # 球（アイコスフィア）の分割回数（apply_quality で決まる）
+
+# ---- 新しいシェーダー（SCENE_SHADING = "full"）の光と色（scene3d.py）----
+#   色は sRGB で書き、シェーダーの中で線形にして計算する
+SCENE_BG = (0.045, 0.058, 0.090)      # 背景（遠くはこの色に溶け込む）。HUD の紺色に合わせる
+SCENE_FLOOR = (0.070, 0.085, 0.120)   # 机の下の床
+KEY_LIGHT = ((-0.50, 1.00, 0.55), (1.00, 0.93, 0.84), 2.1)   # 主な光：(向き, 色, 強さ)。左上手前から、暖かい白
+FILL_LIGHT = ((0.85, 0.45, 0.25), (0.55, 0.70, 1.00), 0.55)  # 補助の光：右から、青みがかった弱い光
+RIM_LIGHT = ((0.10, 0.55, -1.00), (0.60, 0.80, 1.00), 0.9)   # 輪郭の光：奥から（形の縁を浮かび上がらせる）
+SKY_AMBIENT = ((0.32, 0.40, 0.55), 0.55)                      # 環境光（上から）：(色, 強さ)
+GROUND_AMBIENT = ((0.45, 0.30, 0.20), 0.30)                   # 環境光（下から。机の木の照り返し）
+FOG_RANGE = (1.6, 3.6)                # 視点からこの距離 [m] の間で背景色に溶け込む
+EXPOSURE = 0.95                       # 露出（全体の明るさ）
+TABLE_COLOR_HQ = (0.36, 0.25, 0.17)   # 机の色（新しいシェーダー用。木目で明暗がつくので少し暗め）
+BASKET_COLOR_HQ = (0.20, 0.26, 0.33)  # カゴの色（新しいシェーダー用。HUD の紺色に合わせ、上の縁を水色に光らせる）
+BASKET_RIM_HQ = (0.30, 0.85, 1.00)    # カゴの上の縁の色（発光）
+
 LOG_DIR = "logs"
+
+
+def apply_quality(name):
+    """画質の段階を決めて、描画の設定を書きかえる（ウィンドウ・シェーダーを作る前に呼ぶ）"""
+    global RENDER_SCALE, MSAA_SAMPLES, SCENE_SHADING, ARM_MESH_SEGMENTS, SPHERE_SUBDIV, QUALITY_ACTIVE
+    p = QUALITY_PRESETS[name]
+    QUALITY_ACTIVE = name
+    RENDER_SCALE = p["render_scale"]
+    MSAA_SAMPLES = p["msaa"]
+    SCENE_SHADING = p["shading"]
+    ARM_MESH_SEGMENTS = p["segments"]
+    SPHERE_SUBDIV = p["sphere"]
 
 # ============================================================
 # 軽量モード（python main.py --light、または LIGHT_MODE = True）
