@@ -20,6 +20,7 @@ BCI オペレーター（ゲーム本体）。実際の BCI 研究の「ハイ�
     ../.venv/bin/python main.py --test     # カメラなし：マウスの位置 = 視線、マウスの動き = 手、クリック = 握る
     ../.venv/bin/python main.py --light    # 軽量モード（config.apply_light_mode）
     ../.venv/bin/python main.py --window   # ディスプレイいっぱいにせず、1280×720 のウィンドウで
+    ../.venv/bin/python main.py --no-degrade  # 電極劣化なし（ノーマル）で始める（タイトルの M / ← → でも切りかえ）
     ../.venv/bin/python main.py --software # GPU を使わず、X11 互換モード + ソフトウェア描画で（以前の方式）
 F11 で全画面 ⇔ ウィンドウを切りかえる。
 """
@@ -113,6 +114,7 @@ class Game:
         self.resume_play = False
         self.selected = None
         self.lock_time = -1e9          # 最後に行き先を決めた時刻（time.monotonic）
+        self.degrade_on = config.DEGRADE_ENABLED   # 電極劣化あり（チャレンジ）/ なし（ノーマル）。タイトルで切りかえる
         self.last_g = 0.0
         self.hand = None
         self.events = []
@@ -177,15 +179,25 @@ class Game:
         elif s == "hand_calib":
             self.hand_calib.start()
         elif s == "play":
-            self.mission = Mission(self.rng)
+            self.mission = Mission(self.rng, degrade=self.degrade_on)
+            self.events.append(f"mode:{self.mode}")
             self.record = BrainRecord()
             self.grip_switch = GripSwitch()
             self._prev_score = 0
             cam.yaw, cam.pitch, cam.goal_dist = -100.0, 30.0, 3.7
             cam.sway = (-105.0, 25.0)            # 「裏側」の脳は、左半球の外側面を見ながら ±25° 揺れる
-            print(f"[main] 電極劣化の予定（プレイ開始からの秒）: {[round(t) for t in self.mission.degrade_times]}")
+            print(f"[main] モード {self.mode}　電極劣化の予定（プレイ開始からの秒）: "
+                  f"{[round(t) for t in self.mission.degrade_times]}")
         elif s == "result":
             self.finish_game()
+
+    @property
+    def mode(self):
+        """"challenge"（電極劣化あり）/ "normal"（劣化なし）"""
+        return "challenge" if self.degrade_on else "normal"
+
+    def set_mode(self, mode):
+        self.degrade_on = mode == "challenge"
 
     def start_game(self):
         self.build_cortex()
@@ -219,6 +231,10 @@ class Game:
             if not self.debug_on:
                 cv2.destroyWindow(DEBUG_WINDOW)
                 cv2.waitKey(1)
+        elif self.state == "title" and key in (glfw.KEY_M, glfw.KEY_LEFT, glfw.KEY_RIGHT):
+            # モードの切りかえ：← = ノーマル、→ = チャレンジ、M = 入れかえ
+            self.set_mode({glfw.KEY_LEFT: "normal", glfw.KEY_RIGHT: "challenge"}.get(
+                key, "normal" if self.degrade_on else "challenge"))
         elif key == glfw.KEY_T and self.vision is not None and self.state == "title":
             self.test_mode = not self.test_mode
         elif self.state == "title" and go:
@@ -264,8 +280,13 @@ class Game:
     def on_mouse_button(self, window, button, action, mods):
         if button == glfw.MOUSE_BUTTON_LEFT:
             self.mouse_down = action == glfw.PRESS
-            if action == glfw.PRESS and self.state == "title" and self.view.start_button_hit(self.mouse_layout()):
-                self.start_game()
+            if action == glfw.PRESS and self.state == "title":
+                p = self.mouse_layout()
+                mode = self.view.mode_button_hit(p)
+                if mode is not None:
+                    self.set_mode(mode)
+                elif self.view.start_button_hit(p):
+                    self.start_game()
 
     def mouse_layout(self):
         """マウスの位置（論理座標 1280×720。拡大と黒い帯を戻したもの）"""
@@ -539,8 +560,8 @@ class Game:
         m = self.mission
         if self.record.raster is None:
             self.record.snapshot_raster(self.cortex.raster)
-        scores, rank = highscore.add(m.result.score, m.result.collected)
-        self.final = {"result": m.result, "scores": scores, "rank": rank, "record": self.record,
+        scores, rank = highscore.add(m.result.score, m.result.collected, self.mode)
+        self.final = {"result": m.result, "scores": scores, "rank": rank, "record": self.record, "mode": self.mode,
                       "usage": self.record.usage()}
         self.events.append(f"game_end:score={m.result.score}:collected={m.result.collected}")
         print(f"[main] 終了：スコア {m.result.score}、集めた数 {m.result.collected}、失敗 {m.result.failures}、"
@@ -605,9 +626,13 @@ def main():
     parser.add_argument("--test", action="store_true", help="カメラを使わない（マウスで視線・手・握るの代わり）")
     parser.add_argument("--light", action="store_true", help="軽量モード（重い PC 向け）")
     parser.add_argument("--window", action="store_true", help="1280×720 のウィンドウで開く")
+    parser.add_argument("--no-degrade", action="store_true",
+                        help="電極劣化なし（ノーマル）で始める（タイトル画面でも切りかえられる）")
     parser.add_argument("--software", action="store_true",
                         help="GPU を使わず、X11 互換モード + ソフトウェア描画で開く（以前の方式）")
     args = parser.parse_args()
+    if args.no_degrade:
+        config.DEGRADE_ENABLED = False
     if args.light or config.LIGHT_MODE:
         config.apply_light_mode()
     if args.window:

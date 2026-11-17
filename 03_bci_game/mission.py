@@ -83,14 +83,15 @@ class GameResult:
 
 
 class Mission:
-    def __init__(self, rng):
+    def __init__(self, rng, degrade=True):
         self.rng = rng
+        self.degrade_enabled = degrade    # False（ノーマル）なら電極劣化は起きない
         self.result = GameResult()
         self.time_left = config.GAME_TIME
         self.play_time = 0.0
         self.held = None                  # つかんでいる物（FieldItem）
         self.combo = 0                    # COMBO_LEVELS の段階
-        self.degrade_times = degrade_schedule(rng)
+        self.degrade_times = degrade_schedule(rng) if degrade else []
         self.degrade_count = 0
         self.bonus_count = 0
         self.last_bonus = -1e9

@@ -154,6 +154,7 @@ BONUS_COOLDOWN = 15.0         # 1 回降ってきたら、次はこの時間 [�
 BONUS_MAX = 3                 # 1 ゲームで最大何回まで
 
 # 電極劣化イベント：ランダムな時刻に 1〜2 回
+DEGRADE_ENABLED = True        # 電極劣化を起こすか（True = チャレンジ、False = ノーマル）。タイトル画面・--no-degrade でも切りかえる
 DEGRADE_COUNT = (1, 2)        # 回数の範囲（最小, 最大）
 DEGRADE_WINDOW = (25.0, 95.0) # 起きる時刻の範囲 [プレイ開始からの秒]
 DEGRADE_MIN_GAP = 20.0        # 2 回起きるときの最低の間隔 [秒]

@@ -46,7 +46,10 @@ ACCENT = (130, 220, 255)
 GOLD = (255, 225, 120)
 MAGENTA = (255, 150, 230)
 TITLE_BRAIN = (290, 96, 700, 420)
-START_BUTTON = (W / 2 - 170, 590, 340, 60)
+START_BUTTON = (W / 2 - 170, 604, 340, 56)
+# タイトル画面のモードの選択（ノーマル = 電極劣化なし、チャレンジ = 劣化あり）
+MODE_BUTTONS = {"normal": (W / 2 - 215, 550, 210, 46), "challenge": (W / 2 + 5, 550, 210, 46)}
+MODE_TEXT = {"normal": ("NORMAL", "ノーマル　電極劣化なし"), "challenge": ("CHALLENGE", "チャレンジ　電極劣化あり")}
 SCENE_RECT = (0, 0, W, H)
 HUD = config.HUD_HEIGHT
 STEPS = ["物を約 1 秒見つめる → ロボットが近づく", "手を動かしてアームを伸ばし、手を握ってつかむ",
@@ -80,6 +83,18 @@ class GameView:
         ww, wh = glfw.get_window_size(self.g.window)
         x, y, w, h = self.rt.letterbox(ww, wh)
         return np.array([(mx - x) / max(w, 1) * W, (my - y) / max(h, 1) * H])
+
+    def mode_button_hit(self, p):
+        """タイトル画面のモードのボタンの上なら、そのモード（"normal" / "challenge"）"""
+        for mode, (x, y, w, h) in MODE_BUTTONS.items():
+            if x <= p[0] <= x + w and y <= p[1] <= y + h:
+                return mode
+        return None
+
+    def _degrade_mode(self):
+        """電極劣化ありのモードか（プレイ中はそのゲームのモード、それ以外はタイトルで選んでいるモード）"""
+        m = self.g.mission
+        return m.degrade_enabled if m is not None else self.g.degrade_on
 
     def start_button_hit(self, p):
         x, y, w, h = START_BUTTON
@@ -172,6 +187,12 @@ class GameView:
             b.rect(x, y, w, h, (0.08, 0.25, 0.4, 0.8 + 0.2 * pulse))
             b.rect(x, y, w, 2, (0.5, 0.85, 1.0, 1))
             b.rect(x, y + h - 2, w, 2, (0.5, 0.85, 1.0, 1))
+            for mode, (x, y, w, h) in MODE_BUTTONS.items():       # モードの選択（選んでいる方を明るく）
+                on = mode == self.g.mode
+                acc = (1.0, 0.45, 0.3) if mode == "challenge" else (0.4, 0.9, 0.6)
+                b.rect(x, y, w, h, (*[c * (0.35 if on else 0.08) for c in acc], 0.9))
+                for yy in (y, y + h - 2):
+                    b.rect(x, yy, w, 2, (*acc, 1.0 if on else 0.3))
         else:
             k = min(1.0, self.g.state_t / config.MORPH_SEC)
             b.rect(W / 2 - 200, 610, 400, 8, (0.15, 0.2, 0.3, 1))
@@ -188,19 +209,26 @@ class GameView:
                  tracking=0.25)
         self._jt(img, "視線と脳の信号でロボットを操作し、物を集める", "", W / 2, 110, 15, DIM, "center")
         if g.state == "title":
-            self._jt(img, "START", "START", W / 2, START_BUTTON[1] + 6, 26, (255, 255, 255), "center", font="display",
+            self._jt(img, "START", "START", W / 2, START_BUTTON[1] + 4, 26, (255, 255, 255), "center", font="display",
                      bold=True, tracking=0.3)
-            self._jt(img, "SPACE / CLICK", "", W / 2, START_BUTTON[1] + 40, 13, ACCENT, "center", font="tech",
+            for mode, (x, y, w, h) in MODE_BUTTONS.items():
+                on = mode == g.mode
+                en, ja = MODE_TEXT[mode]
+                col = (255, 255, 255) if on else DIM
+                self._jt(img, ("▶ " if on else "") + en, en, x + w / 2, y + 5, 16, col, "center", font="tech", bold=True,
+                         tracking=0.2)
+                self._jt(img, ja, en, x + w / 2, y + 25, 12, col, "center")
+            self._jt(img, "SPACE / CLICK", "", W / 2, START_BUTTON[1] + 33, 13, ACCENT, "center", font="tech",
                      tracking=0.3)
             if g.test_mode:
-                self._jt(img, "TEST MODE  ―  マウスで操作（カメラなし）", "", W / 2, 536, 15, (255, 200, 110), "center",
+                self._jt(img, "TEST MODE  ―  マウスで操作（カメラなし）", "", W / 2, 522, 15, (255, 200, 110), "center",
                          font="tech", tracking=0.08)
             else:
-                self._jt(img, "CAMERA MODE  ―  顔と右手をカメラに映す", "", W / 2, 536, 15, GOOD, "center", font="tech",
+                self._jt(img, "CAMERA MODE  ―  顔と右手をカメラに映す", "", W / 2, 522, 15, GOOD, "center", font="tech",
                          tracking=0.08)
-            keys = "T  CAMERA / TEST     F11  FULLSCREEN     ESC  QUIT" if g.vision is not None else \
-                "F11  FULLSCREEN     ESC  QUIT"
-            self._jt(img, keys, keys, W / 2, 670, 13, DIM, "center", font="tech", tracking=0.2)
+            keys = ("M / ← →  MODE     T  CAMERA / TEST     F11  FULLSCREEN     ESC  QUIT" if g.vision is not None
+                    else "M / ← →  MODE     F11  FULLSCREEN     ESC  QUIT")
+            self._jt(img, keys, keys, W / 2, 674, 13, DIM, "center", font="tech", tracking=0.2)
         else:
             self._jt(img, "LINKING TO CORTEX", "", W / 2, 556, 26, ACCENT, "center", font="display", tracking=0.18)
             self._jt(img, "脳と接続中", "", W / 2, 586, 15, DIM, "center")
@@ -398,7 +426,10 @@ class GameView:
             b.line(gx, gy + gh * (1 - v), gx + gw, gy + gh * (1 - v), 1, (0.18, 0.21, 0.3, 1))
         rec = f["record"]
         tmax = max(config.GAME_TIME, 1.0)
+        challenge = f.get("mode", "challenge") == "challenge"
         for tt, what in rec.marks:
+            if what == "degrade" and not challenge:       # ノーマル（劣化なし）では劣化の印を出さない
+                continue
             x = gx + gw * tt / tmax
             col = (1.0, 0.3, 0.25, 0.95) if what == "degrade" else (1.0, 0.45, 0.85, 0.8)
             b.line(x, gy, x, gy + gh, 2 if what == "degrade" else 1.5, col)
@@ -424,8 +455,9 @@ class GameView:
         self._jt(img, f"集めた数 {r.collected}（{by}）", "collected", 310, 170, 16, INK, "center")
         self._jt(img, f"最高コンボ ×{r.max_combo:.1f}　　失敗 {r.failures}", "combo", 310, 198, 16, INK, "center")
         rank = f["rank"]
-        self._label(img, "HIGH SCORES", "ハイスコア" + (f"　今回 {rank + 1} 位" if rank is not None else ""), 50, 254,
-                    GOLD if rank is not None else ACCENT)
+        mode_ja = MODE_TEXT[f.get("mode", "challenge")][1].split("　")[0]
+        self._label(img, "HIGH SCORES", f"ハイスコア（{mode_ja}）"
+                    + (f"　今回 {rank + 1} 位" if rank is not None else ""), 50, 254, GOLD if rank is not None else ACCENT)
         for i, sc in enumerate(f["scores"]):
             y = 300 + i * 30
             col = GOLD if i == rank else INK
@@ -442,7 +474,9 @@ class GameView:
             self._jt(img, REGION_JA[name], name, x, y, 14, rgb255(REGION_COLORS[name]))
             self._jt(img, f"{f['usage'].get(name, 0.0) * 100:3.0f}%", "", x + 290, y, 14, DIM, "right", font="tech")
         self._label(img, "SPIKES", "最後に物をつかんだ直前の 4 秒（上の白い行 = 把持ニューロン）", 660, 404, DIM, 13)
-        self._label(img, "DECODING ACCURACY", "相関係数の推移　赤 = 電極劣化　ピンク = 再同期", 660, 504, DIM, 13)
+        legend = "相関係数の推移　赤 = 電極劣化　ピンク = 再同期" if f.get("mode", "challenge") == "challenge" \
+            else "相関係数の推移　ピンク = 再同期"
+        self._label(img, "DECODING ACCURACY", legend, 660, 504, DIM, 13)
         self._jt(img, "0 S", "0", 660, 646, 13, DIM, font="tech", tracking=0.1)
         self._jt(img, f"{config.GAME_TIME:.0f} S", "", 1220, 646, 13, DIM, "right", font="tech", tracking=0.1)
         self._jt(img, "SPACE  ―  RETURN TO TITLE", "SPACE: title", W / 2, 684, 16, INK, "center", font="tech",
@@ -507,14 +541,19 @@ class GameView:
         self._jt(img, "COMBO", "", 830, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
         self._jt(img, f"x{m.combo_mult:.1f}" if m else "x1.0", "", 925, 12, 24, GOLD if (m and m.combo > 0) else INK,
                  font="display")
-        state, text, col = self._sync_state()
-        code = {"good": "LINK  STABLE", "degraded": "LINK  DEGRADED", "resync": "RESYNC", "none": "LINK  OFFLINE"}[state]
-        self._jt(img, "NEURAL LINK", "", 1050, 7, 13, DIM if state != "degraded" else (255, 220, 210), font="tech",
-                 bold=True, tracking=0.25)
-        self._jt(img, code, code, 1050, 22, 18, col, font="tech", bold=True, tracking=0.12)
-        sub = {"good": "同期 良好", "degraded": "L で再同期", "resync": f"残り {g.hand_calib.remaining:3.0f} 秒",
-               "none": "同期前"}[state]
-        self._jt(img, sub, "", 1050, 42, 13, col if state == "degraded" else DIM)
+        if not self._degrade_mode():          # ノーマル（劣化なし）：同期の状態は出さず、モードだけ
+            self._jt(img, "MODE", "", 1050, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
+            self._jt(img, "NORMAL", "NORMAL", 1050, 22, 18, DIM, font="tech", bold=True, tracking=0.12)
+        else:                                 # チャレンジ（劣化あり）：同期の状態
+            state, text, col = self._sync_state()
+            code = {"good": "LINK  STABLE", "degraded": "LINK  DEGRADED", "resync": "RESYNC",
+                    "none": "LINK  OFFLINE"}[state]
+            self._jt(img, "NEURAL LINK", "", 1050, 7, 13, DIM if state != "degraded" else (255, 220, 210),
+                     font="tech", bold=True, tracking=0.25)
+            self._jt(img, code, code, 1050, 22, 18, col, font="tech", bold=True, tracking=0.12)
+            sub = {"good": "同期 良好", "degraded": "L で再同期", "resync": f"残り {g.hand_calib.remaining:3.0f} 秒",
+                   "none": "同期前"}[state]
+            self._jt(img, sub, "", 1050, 42, 13, col if state == "degraded" else DIM)
 
         # ---- 得点のポップアップ ----
         now = time.monotonic()
