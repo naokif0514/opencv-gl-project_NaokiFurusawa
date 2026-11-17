@@ -38,6 +38,8 @@ OpenCV（カメラ、色の検出、文字）と OpenGL（シェーダーによ�
 ```bash
 cd opencv-gl-project_NaokiFurusawa
 .venv/bin/pip install -r 03_bci_game/requirements.txt
+# GPU で描くための新しい glfw を、03 専用のフォルダに入れる（.venv と 01・02 は変わらない。入れなければソフトウェア描画）
+.venv/bin/pip install --no-deps --target 03_bci_game/.libs glfw==2.11.0
 
 cd 03_bci_game
 ../.venv/bin/python main.py              # ゲーム（カメラ：視線 + 右手 + 色の物）
@@ -214,15 +216,16 @@ cd 03_bci_game
 ## 8. 処理の重さと軽量モード
 
 ### 描画方式（GPU / ソフトウェア描画）（`gl_backend.py`）
-起動時に、別のプロセスで小さなウィンドウを作って GL_RENDERER を調べ（約 0.3 秒）、描画方式を自動で選びます。
+起動時に、別のプロセスで小さなウィンドウを作って GL_RENDERER と GLFW の版を調べ（約 0.3 秒）、描画方式を自動で選びます。
 
-| 方式 | ウィンドウ | OpenGL | 選ばれる条件 |
-|---|---|---|---|
-| **GPU** | Wayland のネイティブ（glfw の Wayland 版） | EGL | Wayland のセッションで、テストのウィンドウが作れ、GL_RENDERER がソフトウェア描画でない |
-| ソフトウェア描画 | X11 互換モード（XWayland） | GLX | `--software`、Wayland でない、GPU のテストに失敗 |
+| 方式 | ウィンドウ | OpenGL | glfw | 選ばれる条件 |
+|---|---|---|---|---|
+| **GPU** | Wayland のネイティブ | EGL | `03_bci_game/.libs/` の pyglfw 2.11.0（GLFW 3.4） | Wayland のセッションで、GLFW 3.4 以上、GL_RENDERER がソフトウェア描画でない |
+| ソフトウェア描画 | X11 互換モード（XWayland） | GLX | `.venv` の pyglfw 2.7.0（GLFW 3.3.9） | `--software`、Wayland でない、GPU のテストに失敗、`.libs/` がない |
 
 - 以前は X11 互換モードで開いていたが、XWayland が DRI3 に対応していないため、Intel の GPU があっても CPU で描くソフトウェア描画（llvmpipe）になっていた
-- Wayland 版の glfw が落ちていた原因は、窓枠を描く libdecor の GTK プラグインが GNOME の設定のキー（`antialiasing`）を見つけられずに異常終了することだった。GTK プラグインを読まないよう `LIBDECOR_PLUGIN_DIR` を指定している。cairo プラグイン（`libdecor-0-plugin-1-cairo`）が入っていなければ **窓枠なし** で開く（ESC で終了、F11 で全画面）
+- **GLFW 3.4 が必要**：`.venv` の GLFW 3.3.9 の Wayland 版は、GNOME 46 でウィンドウにクリックもキーも届かなかった（タイトル画面から進めない）。GLFW 3.4 では届くことを確認した。01・02 に影響しないよう、`.venv` は変えずに 03 専用のフォルダ（`.libs/`、git には入れない）へ入れ、GPU のときだけ読み込む
+- Wayland 版の glfw が落ちていた原因は、窓枠を描く libdecor の GTK プラグインが GNOME の設定のキー（`antialiasing`）を見つけられずに異常終了することだった。GLFW 3.4 の設定で libdecor を使わず、GLFW が自分で描く簡単な枠にしている
 - Wayland では、ウィンドウが見えていない（最小化・ほかのワークスペースなど）あいだ、垂直同期つきの画面の切りかえが返ってこず、ゲームが止まる（実際に確認）。GPU のときは垂直同期を使わず、60 fps（`FRAME_CAP_FPS`）に自分で抑える
 - 環境変数 `PYGLFW_LIBRARY_VARIANT`（`x11` / `wayland`）を設定すると、自動の判定より優先される
 

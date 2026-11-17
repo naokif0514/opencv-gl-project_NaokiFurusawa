@@ -10,3 +10,6 @@ glfw==2.7.0
 # numpy を 1.26.4 のまま入れるため、インストールは次のようにする：
 #   .venv/bin/pip install -r 03_bci_game/requirements.txt
 nilearn==0.14.1
+# ---- 03_bci_game の GPU 描画用（.venv とは別に、03 専用のフォルダへ入れる。01・02 は 2.7.0 のまま）----
+# .venv の glfw 2.7.0（GLFW 3.3.9）の Wayland 版は GNOME で入力が届かないため。入れなければソフトウェア描画で動く：
+#   .venv/bin/pip install --no-deps --target 03_bci_game/.libs glfw==2.11.0

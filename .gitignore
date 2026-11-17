@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 # 各作品の logs/ に保存される CSV
 */logs/*.csv
+# 03_bci_game 専用の新しい glfw（GPU で描くとき用。pip で入れる。README 8 章）
+03_bci_game/.libs/

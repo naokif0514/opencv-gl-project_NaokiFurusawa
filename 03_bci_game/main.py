@@ -125,7 +125,7 @@ class Game:
         ウィンドウを作る。既定ではディスプレイいっぱい（最大化）。中身は決まった解像度のオフスクリーンに描いて
         ウィンドウの大きさへ拡大するので（render_target.py）、ウィンドウの大きさは自由に変えられる
         """
-        if not glfw.init():
+        if not gl_backend.init_glfw(glfw):
             raise RuntimeError("glfw の初期化に失敗しました")
         glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)

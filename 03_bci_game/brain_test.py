@@ -81,7 +81,7 @@ class BrainTest:
             self.tracker.debug_enabled = True
 
         # ---- ウィンドウ ----
-        if not glfw.init():
+        if not gl_backend.init_glfw(glfw):
             raise RuntimeError("glfw の初期化に失敗しました")
         glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)

@@ -1,31 +1,37 @@
 """
 gl_backend.py
 -------------
-OpenGL の描画方式（GPU か、ソフトウェア描画か）を選ぶ。glfw・PyOpenGL・cv2 を import する前に setup() を呼ぶ。
-（環境変数でライブラリの種類が決まるので、import したあとでは変えられない）
+OpenGL の描画方式（GPU か、ソフトウェア描画か）を選ぶ。glfw・PyOpenGL・cv2 を import する前に setup() を呼び、
+glfw.init() の代わりに init_glfw(glfw) を使う。
+（環境変数と sys.path でライブラリが決まるので、import したあとでは変えられない）
 
 ■ 方式
-  "gpu"      : Wayland のネイティブのウィンドウ + EGL。Intel などの GPU で描く
+  "gpu"      : Wayland のネイティブのウィンドウ + EGL。Intel などの GPU で描く。
+               03 専用に入れた新しい glfw（.libs/、pyglfw 2.11.0 = GLFW 3.4）を使う
   "software" : X11 互換モード（XWayland）のウィンドウ + GLX。この PC では XWayland が DRI3 に対応していないため、
-               CPU で描くソフトウェア描画（llvmpipe）になる（以前からの方式。どの環境でもほぼ確実に動く）
+               CPU で描くソフトウェア描画（llvmpipe）になる（以前からの方式。.venv の glfw 2.7.0 を使う）
 
 ■ 選び方
   1. --software が指定されている、または Wayland のセッションでない → "software"
-  2. 小さなテスト（別のプロセス）で、Wayland + EGL のウィンドウを作って GL_RENDERER を調べる。
-     起動でき、ソフトウェア描画（llvmpipe など）でなければ "gpu"。落ちた・時間切れ・ソフトウェア描画なら "software"
-     （別のプロセスで試すので、テストが異常終了してもゲームは落ちない。かかる時間は 1 秒くらい）
+  2. 小さなテスト（別のプロセス）で、Wayland + EGL のウィンドウを作って GL_RENDERER と GLFW の版を調べる。
+     GLFW が 3.4 以上で、ソフトウェア描画（llvmpipe など）でなければ "gpu"。それ以外は "software"
+     （別のプロセスで試すので、テストが異常終了してもゲームは落ちない。かかる時間は 0.3 秒くらい）
   3. 環境変数 PYGLFW_LIBRARY_VARIANT がすでに設定されていれば、それに従う（自分で方式を決めたいとき）
 
-■ Wayland で glfw が落ちる問題
-  glfw（Wayland 版）が窓枠を描くのに使う libdecor の GTK プラグインが、GNOME の設定（GSettings）のキーが
-  見つからずに異常終了する（Settings schema ... does not contain a key named 'antialiasing'）。
-  GTK プラグインを使わないよう、cairo プラグインだけを入れたフォルダを作って LIBDECOR_PLUGIN_DIR で指定する。
-  cairo プラグイン（Ubuntu の libdecor-0-plugin-1-cairo）が入っていなければ空のフォルダになり、窓枠なしで開く
-  （ESC で終了、F11 で全画面。ウィンドウの移動・大きさの変更はできない）。
+■ GLFW 3.4 が必要な理由（実際に確認したこと）
+  .venv の pyglfw 2.7.0 に入っている GLFW 3.3.9 の Wayland 版は、GNOME 46 でウィンドウにクリックもキーも
+  届かなかった（タイトル画面から進めない）。GLFW 3.4 では届く。01・02 に影響しないよう、.venv は変えずに
+  03 専用のフォルダへ入れる：
+      .venv/bin/pip install --no-deps --target 03_bci_game/.libs glfw==2.11.0
+
+■ 窓枠（libdecor を使わない）
+  Wayland 版の glfw が窓枠に使う libdecor の GTK プラグインは、GNOME の設定（GSettings）のキーが見つからずに
+  異常終了する（Settings schema ... does not contain a key named 'antialiasing'）。GLFW 3.4 の
+  GLFW_WAYLAND_LIBDECOR = DISABLE で libdecor を使わず、GLFW が自分で描く簡単な枠にする。
 
 ■ 垂直同期を使わない（GPU のとき）
-  Wayland では、ウィンドウが見えていない（ほかのワークスペース・画面ロックなど）あいだ、垂直同期つきの
-  swap_buffers が返ってこなくなり、ゲームが止まることがある。GPU のときは swap_interval(0) にして、
+  Wayland では、ウィンドウが見えていない（最小化・ほかのワークスペースなど）あいだ、垂直同期つきの
+  swap_buffers が返ってこず、ゲームが止まる（実際に確認）。GPU のときは swap_interval(0) にして、
   FrameLimiter で FRAME_CAP_FPS（60）に抑える。ソフトウェア描画は 60 fps に届かないので、今までどおり垂直同期を使う。
 """
 
@@ -35,8 +41,9 @@ import subprocess
 import sys
 import time
 
+LIBS = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".libs")
 SOFT_NAMES = ("llvmpipe", "softpipe", "swrast", "software")
-SYS_LIBDECOR = "/usr/lib/x86_64-linux-gnu/libdecor/plugins-1"
+MIN_GLFW = (3, 4)
 PROBE_TIMEOUT = 8.0
 
 backend = None          # 選んだ方式（"gpu" / "software"）
@@ -44,7 +51,9 @@ reason = ""             # 選んだ理由（起動時に表示する）
 
 _PROBE = r"""
 import json, glfw
-r = {}
+r = {"glfw": glfw.get_version_string().decode()}
+if hasattr(glfw, "WAYLAND_LIBDECOR"):
+    glfw.init_hint(glfw.WAYLAND_LIBDECOR, glfw.WAYLAND_DISABLE_LIBDECOR)
 if glfw.init():
     glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
     glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
@@ -63,29 +72,21 @@ print("PROBE " + json.dumps(r))
 """
 
 
-def _libdecor_dir():
-    """cairo プラグインだけを入れたフォルダ（~/.cache の下）。cairo がなければ空のフォルダ（窓枠なし）"""
-    d = os.path.join(os.path.expanduser("~"), ".cache", "bci_operator", "libdecor-plugins")
-    try:
-        os.makedirs(d, exist_ok=True)
-        src = os.path.join(SYS_LIBDECOR, "libdecor-cairo.so")
-        dst = os.path.join(d, "libdecor-cairo.so")
-        if os.path.lexists(dst) and not os.path.exists(dst):
-            os.remove(dst)                       # リンク先がなくなった古いリンクは消す
-        if os.path.exists(src) and not os.path.lexists(dst):
-            os.symlink(src, dst)
-    except OSError:
-        pass
-    return d
-
-
 def _gpu_env():
+    pp = os.environ.get("PYTHONPATH")
     return {"PYGLFW_LIBRARY_VARIANT": "wayland", "PYOPENGL_PLATFORM": "egl",
-            "LIBDECOR_PLUGIN_DIR": os.environ.get("LIBDECOR_PLUGIN_DIR") or _libdecor_dir()}
+            "PYTHONPATH": LIBS + (os.pathsep + pp if pp else "")}
+
+
+def _version(s):
+    try:
+        return tuple(int(x) for x in s.split()[0].split(".")[:2])
+    except (ValueError, IndexError):
+        return (0, 0)
 
 
 def _probe(env):
-    """別のプロセスで GL_RENDERER を調べる。(renderer または None, 失敗の理由)"""
+    """別のプロセスで調べる。(結果の dict または None, 失敗の理由)"""
     try:
         out = subprocess.run([sys.executable, "-c", _PROBE], env={**os.environ, **env}, capture_output=True,
                              text=True, timeout=PROBE_TIMEOUT)
@@ -93,27 +94,27 @@ def _probe(env):
         return None, f"テストが起動しない・時間切れ（{type(e).__name__}）"
     for line in out.stdout.splitlines():
         if line.startswith("PROBE "):
-            r = json.loads(line[6:]).get("renderer")
-            return r, ("" if r else "ウィンドウを作れない")
+            return json.loads(line[6:]), ""
     return None, f"テストが異常終了（終了コード {out.returncode}）"
 
 
-def _set(env):
-    for k, v in env.items():
-        os.environ[k] = v
+def _use_gpu():
+    os.environ["PYGLFW_LIBRARY_VARIANT"] = "wayland"
+    os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+    if os.path.isdir(LIBS) and LIBS not in sys.path:
+        sys.path.insert(0, LIBS)              # 03 専用の新しい glfw を先に探す
 
 
 def setup(force_software=False):
-    """描画方式を選んで環境変数を設定する。選んだ方式（"gpu" / "software"）を返す"""
+    """描画方式を選んで環境変数・sys.path を設定する。選んだ方式（"gpu" / "software"）を返す"""
     global backend, reason
     os.environ.setdefault("QT_QPA_PLATFORM", "xcb")       # OpenCV のウィンドウ（Qt）は X11 互換モードで
-    soft = {"PYGLFW_LIBRARY_VARIANT": "x11", "PYOPENGL_PLATFORM": "glx"}
     if "PYGLFW_LIBRARY_VARIANT" in os.environ:
-        backend = "gpu" if os.environ["PYGLFW_LIBRARY_VARIANT"] == "wayland" else "software"
-        if backend == "gpu":
-            os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
-            os.environ.setdefault("LIBDECOR_PLUGIN_DIR", _libdecor_dir())
+        if os.environ["PYGLFW_LIBRARY_VARIANT"] == "wayland":
+            backend = "gpu"
+            _use_gpu()
         else:
+            backend = "software"
             os.environ.setdefault("PYOPENGL_PLATFORM", "glx")
         reason = "環境変数 PYGLFW_LIBRARY_VARIANT の指定"
         return backend
@@ -122,16 +123,33 @@ def setup(force_software=False):
     elif not os.environ.get("WAYLAND_DISPLAY"):
         backend, reason = "software", "Wayland のセッションではない"
     else:
-        env = _gpu_env()
-        renderer, why = _probe(env)
-        if renderer is not None and not any(s in renderer.lower() for s in SOFT_NAMES):
-            _set(env)
-            backend, reason = "gpu", f"GPU が使える（{renderer}）"
+        r, why = _probe(_gpu_env())
+        renderer = (r or {}).get("renderer")
+        ver = (r or {}).get("glfw", "")
+        if r is None:
+            reason = f"GPU が使えない：{why}"
+        elif _version(ver) < MIN_GLFW:
+            reason = (f"GLFW {ver.split()[0]} は Wayland で入力が届かない（03_bci_game/.libs に glfw==2.11.0 を"
+                      f"入れると GPU を使える。README 8 章）")
+        elif renderer is None:
+            reason = "GPU が使えない：ウィンドウを作れない"
+        elif any(s in renderer.lower() for s in SOFT_NAMES):
+            reason = f"GPU が使えない：{renderer}"
+        else:
+            _use_gpu()
+            backend, reason = "gpu", f"GPU が使える（{renderer}、GLFW {ver.split()[0]}）"
             return backend
         backend = "software"
-        reason = f"GPU が使えない：{why or renderer}"
-    _set(soft)
+    os.environ["PYGLFW_LIBRARY_VARIANT"] = "x11"
+    os.environ["PYOPENGL_PLATFORM"] = "glx"
     return backend
+
+
+def init_glfw(glfw):
+    """glfw.init() の代わり。GPU（Wayland）のときは libdecor を使わない（GTK プラグインで落ちるため）"""
+    if backend == "gpu" and hasattr(glfw, "WAYLAND_LIBDECOR"):
+        glfw.init_hint(glfw.WAYLAND_LIBDECOR, glfw.WAYLAND_DISABLE_LIBDECOR)
+    return glfw.init()
 
 
 def swap_interval():
