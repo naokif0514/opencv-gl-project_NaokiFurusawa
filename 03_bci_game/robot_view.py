@@ -1,9 +1,10 @@
 """
 robot_view.py
 -------------
-3D の場面で使うメッシュ（立方体・ふたつきの円柱・球）と、ロボット（台座 + 2 関節アーム + グリッパー）の描画。
-（02_pseudo_bci/renderer.py の ArmView と同じ方法：同じメッシュを部品ごとの変換行列で使い回す。
-  03 では真上からの正射影をやめ、scene3d.py の透視投影の 3D 空間に置くように作り直した）
+3D の場面で使うメッシュ（立方体・ふたつきの円柱・球。物・カゴ・机に使う）と、ロボットの描画。
+ロボットは、assets/models/robot.obj（tools/make_robot_model.py で Python のコードから生成した自作のモデル。
+約 3,200 三角形）を部品ごとに読み込み、関節の位置・角度の変換行列で動かして描く
+（部品ごとに変換行列を変えて描く方法は 02_pseudo_bci/renderer.py の ArmView と同じ）。
 
 座標の対応（scene3d.to3d）：ワールド座標 (x, y)（机の上の平面、y は奥）→ 3D (X, 高さ, Z)
   X = x − WORLD_W/2、Z = WORLD_H/2 − y（奥ほど Z が小さい = カメラから遠い）
@@ -12,6 +13,7 @@ robot_view.py
 
 import ctypes
 import math
+import os
 
 import numpy as np
 from OpenGL import GL as gl
@@ -93,62 +95,116 @@ class Meshes:
         self.cube = make_mesh(*cube_mesh())
 
 
-class RobotView:
-    """ロボット（台座 + 車輪 + 2 関節アーム + グリッパー）を scene3d の空間に描く"""
+# ============================================================
+# ロボットのモデル（assets/models/robot.obj。tools/make_robot_model.py で生成）
+# ============================================================
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "models", "robot.obj")
 
-    BODY_COLOR = (0.22, 0.27, 0.36)
-    ACCENT_COLOR = (0.15, 0.75, 0.95)
-    LINK_COLOR = (0.70, 0.74, 0.82)
-    JOINT_COLOR = (0.95, 0.55, 0.18)
-    WHEEL_COLOR = (0.08, 0.08, 0.10)
-    ARM_HEIGHT = 0.075            # アームを動かす高さ（机の上の平面と平行）
+# 質感：OBJ の usemtl の名前 → (色, 新しいシェーダーの質感, 以前のシェーダーの鏡面反射の強さ, 発光)
+ROBOT_MATERIALS = {
+    "graphite": ((0.17, 0.19, 0.23), "gunmetal", 0.35, 0.0),   # 車体・アームの横の板：暗い金属
+    "panel":    ((0.80, 0.83, 0.87), "painted", 0.30, 0.0),    # デッキ・アームのはり：白い塗装
+    "steel":    ((0.70, 0.73, 0.77), "steel", 0.60, 0.0),      # ホイール・指・ふた：鋼
+    "rubber":   ((0.07, 0.07, 0.08), "matte", 0.05, 0.0),      # タイヤ・指先のパッド：ゴム
+    "joint":    ((0.26, 0.29, 0.34), "anodized", 0.45, 0.0),   # 関節のハウジング：暗いアルマイト
+    "accent":   ((0.30, 0.88, 1.00), "plastic", 0.30, 0.85),   # 光る線・表示灯：水色（HUD の色）
+    "warn":     ((1.00, 0.60, 0.18), "painted", 0.30, 0.0),    # 注意の印：オレンジ
+}
+
+
+def load_obj(path):
+    """OBJ（v / vn / f v//vn、g 部品.質感）を読み、{部品: [(質感, (vao, 個数)), ...]} を返す"""
+    vs, ns, groups, cur = [], [], {}, None
+    with open(path, encoding="utf-8") as fp:
+        for line in fp:
+            t = line.split()
+            if not t or t[0].startswith("#"):
+                continue
+            if t[0] == "v":
+                vs.append([float(x) for x in t[1:4]])
+            elif t[0] == "vn":
+                ns.append([float(x) for x in t[1:4]])
+            elif t[0] == "g":
+                cur = t[1]
+                groups.setdefault(cur, [])
+            elif t[0] == "f":
+                groups[cur].append([tuple(int(i) - 1 for i in c.split("//")) for c in t[1:4]])
+    vs, ns = np.array(vs, np.float32), np.array(ns, np.float32)
+    parts = {}
+    for name, faces in groups.items():
+        part, mat = name.split(".")
+        corners = np.array(faces).reshape(-1, 2)
+        verts = np.hstack([vs[corners[:, 0]], ns[corners[:, 1]]]).astype(np.float32)
+        idx = np.arange(len(verts), dtype=np.uint32)
+        parts.setdefault(part, []).append((mat, make_mesh(verts, idx)))
+    return parts
+
+
+class RobotView:
+    """
+    ロボットを scene3d の空間に描く。部品ごとに、関節の位置と角度から変換行列を作る：
+      車体・車輪：台座の位置と向き（車輪は進んだ距離と曲がった角度で回す）
+      肩：肩の軸で θ1、上腕：肩から θ1、肘・前腕：肘から θ1 + θ2、手首・指：手先から θ1 + θ2
+      指：開き具合（robot.grip）で左右に開く。物を持っているときは、物の大きさのところで止める
+    """
+
+    ARM_HEIGHT = 0.075            # アームを動かす高さ（机の上の平面と平行。モデルもこの高さで作ってある）
+    WHEEL_R = 0.016               # 車輪の半径
+    WHEEL_POS = ((0.33, 1), (0.33, -1), (-0.33, 1), (-0.33, -1))   # (台座の長さに対する前後の位置, 右 = 1 / 左 = −1)
+    FINGER_GAP = (0.0016, 0.0115) # 指の内側の面の、中心からの距離（閉じた, 開いた）
 
     def __init__(self, scene):
         self.s = scene
+        self.parts = load_obj(MODEL_PATH)
+        self.prev = None              # (位置, 向き)：車輪を回すため
+        self.spin = {1: 0.0, -1: 0.0} # 右・左の車輪の回転角
 
-    def _link(self, p0, p1, r, color, h, material="steel"):
-        """ワールド座標の 2 点を、高さ h で結ぶ円柱"""
+    def _part(self, name, M, rot):
         s = self.s
-        a, b = s.to3d(p0, h), s.to3d(p1, h)
-        d = b - a
-        length = float(np.hypot(d[0], d[2]))
-        rot = rotate_y(math.atan2(-d[2], d[0]))
-        s.draw(s.meshes.cyl, translate(*a) @ rot @ scale(length, r, r), rot, color, spec=0.6, material=material)
+        for mat, mesh in self.parts[name]:
+            color, material, spec, emissive = ROBOT_MATERIALS[mat]
+            s.draw(mesh, M, rot, color, emissive=emissive, spec=spec, material=material)
 
-    def draw(self, robot):
+    def _update_wheels(self, robot):
+        """車輪の回転：前へ進んだ距離 ± 向きを変えた分（左右の車輪で逆向き）"""
+        pos, hd = robot.pos.copy(), robot.heading
+        if self.prev is not None:
+            d = pos - self.prev[0]
+            fwd = float(np.dot(d, robot.forward))
+            dh = (hd - self.prev[1] + math.pi) % (2 * math.pi) - math.pi
+            half = config.ROBOT_BODY[1] / 2
+            for side in (1, -1):
+                # 右の車輪（side = 1）は、左に曲がる（dh > 0）と多く進む
+                self.spin[side] += (fwd + side * dh * half) / self.WHEEL_R
+        self.prev = (pos, hd)
+
+    def draw(self, robot, held_half=None):
+        """held_half：持っている物の表面までの距離（指をそこで止める。持っていなければ None）"""
         s = self.s
-        f = robot.heading
-        fw, side = robot.forward, np.array([-math.sin(f), math.cos(f)])
+        self._update_wheels(robot)
         L, Wd = config.ROBOT_BODY
-        rot = rotate_y(f)
-        # ---- 台座 ----
-        c = s.to3d(robot.pos, 0.032)
-        s.draw(s.meshes.cube, translate(*c) @ rot @ scale(L / 2, 0.022, Wd / 2), rot, self.BODY_COLOR, spec=0.3,
-               material="gunmetal")
-        fr = s.to3d(robot.pos + fw * L * 0.42, 0.05)
-        s.draw(s.meshes.cube, translate(*fr) @ rot @ scale(0.008, 0.006, Wd * 0.42), rot, self.ACCENT_COLOR,
-               emissive=0.6, material="plastic")
-        axle = rotate_y(f + math.pi / 2)              # 車輪（車軸は台座の左右方向）
-        for sx in (-0.3, 0.3):
-            for sy in (-1, 1):
-                w = robot.pos + fw * L * sx + side * sy * (Wd / 2) - side * 0.007
-                s.draw(s.meshes.cyl, translate(*s.to3d(w, 0.016)) @ axle @ scale(0.014, 0.016, 0.016), axle,
-                       self.WHEEL_COLOR, material="matte")
+        rot = rotate_y(robot.heading)
+        base = translate(*s.to3d(robot.pos)) @ rot
+        self._part("chassis", base, rot)
+        for fx, side in self.WHEEL_POS:
+            z = side * (Wd / 2 - 0.007)
+            spin = rotate_z(-self.spin[side])
+            self._part("wheel", base @ translate(fx * L, self.WHEEL_R, z) @ spin, rot @ spin)
 
-        # ---- アーム（机と平行な高さ ARM_HEIGHT の平面で動く）----
         pose = robot.pose
-        h = self.ARM_HEIGHT
-        s.draw(s.meshes.cyl, translate(*s.to3d(pose.base, 0.05)) @ rotate_z(math.pi / 2) @ scale(h - 0.05, 0.014, 0.014),
-               np.identity(4, dtype=np.float32), self.LINK_COLOR, material="steel")      # 肩の柱
-        for p, r in ((pose.base, 0.020), (pose.elbow, 0.016), (pose.hand, 0.012)):
-            s.draw(s.meshes.sph, translate(*s.to3d(p, h)) @ scale(r, r, r), np.identity(4, dtype=np.float32),
-                   self.JOINT_COLOR, spec=0.5, material="anodized")
-        self._link(pose.base, pose.elbow, 0.011, self.LINK_COLOR, h)
-        self._link(pose.elbow, pose.hand, 0.009, self.LINK_COLOR, h)
-        # グリッパー：前腕の向きから、開き具合に応じた角度で 2 本の指を出し、先を少し下へ
+        t1 = pose.theta1
         fa = pose.theta1 + pose.theta2
-        spread = math.radians(8 + 30 * robot.grip)
-        for sgn in (1, -1):
-            a = fa + sgn * spread
-            tip = pose.hand + 0.03 * np.array([math.cos(a), math.sin(a)])
-            self._link(pose.hand, tip, 0.005, self.LINK_COLOR, h)
+        r1, rf = rotate_y(t1), rotate_y(fa)
+        self._part("shoulder", translate(*s.to3d(pose.base)) @ r1, r1)
+        self._part("upper_arm", translate(*s.to3d(pose.base)) @ r1, r1)
+        self._part("elbow", translate(*s.to3d(pose.elbow)) @ rf, rf)
+        self._part("forearm", translate(*s.to3d(pose.elbow)) @ rf, rf)
+        wrist = translate(*s.to3d(pose.hand)) @ rf
+        self._part("wrist", wrist, rf)
+        lo, hi = self.FINGER_GAP
+        gap = lo + (hi - lo) * robot.grip
+        if held_half is not None:             # 持っている物の表面で止める（めり込まない）
+            gap = max(gap, held_half + 0.0006)
+        mirror = np.diag([1.0, 1.0, -1.0, 1.0]).astype(np.float32)
+        self._part("finger", wrist @ translate(0, 0, gap), rf)
+        self._part("finger", wrist @ mirror @ translate(0, 0, gap), rf @ mirror)

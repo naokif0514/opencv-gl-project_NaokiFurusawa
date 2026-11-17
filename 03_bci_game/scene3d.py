@@ -243,7 +243,9 @@ class Scene3D:
         for it in items:
             if not it.held:
                 self._item(it, t, selected == it.id)
-        self.robot_view.draw(robot)
+        # 持っている物の表面の、つかむ位置からの距離（指をそこで止める）：箱は半分の幅、ほかは半径
+        held_half = None if held is None else held.radius * (0.85 if held.spec["shape"] == "cube" else 1.0)
+        self.robot_view.draw(robot, held_half)
         if held is not None:                       # つかんでいる物：グリッパーの先、アームの高さの少し下
             saved = held.height
             held.height = RobotView.ARM_HEIGHT - held.radius * 1.2
