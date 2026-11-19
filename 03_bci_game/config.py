@@ -192,8 +192,8 @@ RIVAL_LEVELS = {
     #  pause：着いてからアームを伸ばすまで・つかんでから運び出すまでのためらい [秒]
     "weak":   {"neurons": 40,  "noise": 12.0, "speed": 0.08, "think": 3.0, "steal": 0.10, "bump": 0.20,
                "arm": 0.09, "pause": 2.0},
-    "normal": {"neurons": 80,  "noise": 7.0,  "speed": 0.12, "think": 2.0, "steal": 0.35, "bump": 0.40,
-               "arm": 0.14, "pause": 1.3},
+    "normal": {"neurons": 80,  "noise": 7.0,  "speed": 0.10, "think": 2.8, "steal": 0.35, "bump": 0.40,
+               "arm": 0.12, "pause": 1.7},
     "strong": {"neurons": 140, "noise": 4.0,  "speed": 0.16, "think": 1.2, "steal": 0.70, "bump": 0.60,
                "arm": 0.20, "pause": 0.8},
 }
