@@ -18,6 +18,7 @@ vision.py
   ・処理はこの別スレッドで行い、描画のフレームレートに影響しないようにする
 """
 
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -49,6 +50,7 @@ class VisionState:
     fps: float = 0.0                        # カメラ処理のフレームレート
     face_fps: float = 0.0
     hand_fps: float = 0.0
+    hand_size: float | None = None          # 手の映る大きさ（手首 → 中指の付け根、画像の幅に対する割合。なめらかにした値）
 
 
 # ============================================================
@@ -93,6 +95,15 @@ def gaze_features(lm, w, h):
     iod = np.linalg.norm(centers[1] - centers[0])
     nose = P[NOSE_TIP] - mid
     return np.array([iris[0], iris[1], nose[0] / iod, nose[1] / iod])
+
+
+def hand_size(lm, aspect):
+    """
+    手の映る大きさ：手首（0）→ 中指の付け根（9）の長さ [画像の幅に対する割合]。
+    縦は画像の高さで割られているので aspect（高さ / 幅）を掛けてそろえる。奥行き z も使う（手を傾けても縮みにくい）
+    """
+    a, b = lm[0], lm[9]
+    return float(np.linalg.norm([b.x - a.x, (b.y - a.y) * aspect, b.z - a.z]))
 
 
 def hand_openness(lm):
@@ -200,6 +211,7 @@ class VisionThread(threading.Thread):
         self.debug_enabled = False
         self.face_enabled = True      # 視線を使わない場面では止めて軽くできる
         self.velocity = VelocityEstimator()
+        self.size_smooth = None       # なめらかにした手の大きさ
         self.colors = dict(config.ITEM_COLORS)   # 検出する色（register_color で追加される。差しかえは丸ごと行う）
         self._register_request = None
 
@@ -279,6 +291,7 @@ class VisionThread(threading.Thread):
             h, w = frame.shape[:2]
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             st = VisionState(hand=st.hand, hand_open=st.hand_open, gaze_feat=st.gaze_feat, gaze_time=st.gaze_time,
+                             hand_size=st.hand_size,
                              face_detected=st.face_detected, face_fps=st.face_fps, hand_fps=st.hand_fps)
             hand_lm = face_lm = None
 
@@ -292,10 +305,22 @@ class VisionThread(threading.Thread):
                     lm = hand_lm.landmark[config.HAND_LANDMARK]
                     pos = np.array([lm.x, 1.0 - lm.y])
                     st.hand_open = hand_openness(hand_lm.landmark)
+                    size = hand_size(hand_lm.landmark, h / w)
+                    if size > 1e-4:
+                        if self.size_smooth is None:
+                            self.size_smooth = size
+                        else:
+                            k = 1.0 - math.exp(-max(now - last_seen, 1e-3) / config.HAND_SIZE_TAU)
+                            self.size_smooth += (size - self.size_smooth) * k
+                        st.hand_size = self.size_smooth
                     last_seen = now
                 detected = pos is not None
                 if detected:
                     vel = self.velocity.update(pos, now)
+                    if config.HAND_SIZE_NORMALIZE and self.size_smooth:
+                        # 手の映る大きさで割る（カメラから遠い = 小さく映る手ほど、同じ動きでも画像の上では遅いため）
+                        lo, hi = config.HAND_SIZE_SCALE_RANGE
+                        vel = vel * float(np.clip(config.HAND_REF_SIZE / self.size_smooth, lo, hi))
                 elif now - last_seen > config.HAND_LOST_SEC:
                     vel = self.velocity.update(None, now)
                     st.hand_open = None

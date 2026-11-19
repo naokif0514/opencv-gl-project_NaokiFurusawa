@@ -18,6 +18,8 @@ COLUMNS = ["time_sec", "state", "mode", "gaze_x", "gaze_y", "dwell_target", "dwe
            "n_alive", "n_neurons", "degrade_count", "collected", "score", "score_delta", "combo", "time_left",
            # チャレンジ（ライバルとの対戦）：ライバルの位置・状態（行動 / frozen）・スコア・持っている物・止めた回数
            "rival_level", "rival_x", "rival_y", "rival_state", "rival_score", "rival_holding", "freezes",
+           # 手の映る大きさ（手首 → 中指の付け根、画像の幅に対する割合。速度をこれで割る。config.HAND_REF_SIZE を参照）
+           "hand_size",
            "event"]
 
 

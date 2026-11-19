@@ -54,8 +54,9 @@ def grip_target(t):
     return 1.0 if int(tg / config.HC_GRIP_PERIOD) % 2 == 1 else 0.0
 
 
-def target_position(t):
-    R = config.CALIB_RADIUS
+def target_position(t, amp=1.0):
+    """ターゲットの位置。amp：動きの大きさの倍率（プレイヤーは HC_PLAYER_AMPLITUDE、ライバルの模擬は 1）"""
+    R = config.CALIB_RADIUS * amp
     p = phase(t)
     if p in ("ready", "grip"):
         return CENTER.copy()
@@ -73,12 +74,14 @@ def target_position(t):
     return CENTER + r * np.array([math.cos(a), math.sin(a)])
 
 
-def target_velocity(t, h=1e-3):
-    return (target_position(t + h) - target_position(t - h)) / (2 * h)
+def target_velocity(t, h=1e-3, amp=1.0):
+    return (target_position(t + h, amp) - target_position(t - h, amp)) / (2 * h)
 
 
 class HandCalibration:
-    def __init__(self):
+    def __init__(self, amplitude=1.0):
+        """amplitude：ターゲットの動きの大きさ（= 速さ）の倍率"""
+        self.amplitude = amplitude
         self.active = False
         self.duration = total_duration()
         self.t = 0.0
@@ -94,7 +97,7 @@ class HandCalibration:
 
     @property
     def target(self):
-        return target_position(self.t)
+        return target_position(self.t, self.amplitude)
 
     @property
     def phase(self):

@@ -15,8 +15,9 @@ robot.py
 ■ デコードした速度でアームを動かす（drive_arm）
   手先の目標を「肩からの相対位置 offset」で持ち、デコードした手の速度 v̂ で動かす（02 のカーソルと同じリーク積分）：
       offset ← offset + G v̂ Δt − λ (offset − 待機の位置) Δt
-  G（ARM_VEL_GAIN）は手の速度（カメラ画像の幅/秒）→ ワールド座標の速度の倍率、λ（ARM_LEAK）は推定のずれが
-  たまって腕が流されないように、待機の位置へ弱く戻す強さ。offset は画面の向き（右・上）で持つので、
+  G（プレイヤーは ARM_VEL_GAIN、加速カーブつき。main.Game.arm_velocity）は手の速度（画面/秒）→ ワールド座標の
+  速度の倍率、λ（ARM_LEAK。ライバルは RIVAL_ARM_LEAK）は推定のずれがたまって腕が流されないように、
+  待機の位置へ弱く戻す強さ。offset は画面の向き（右・上）で持つので、
   台座の向きに関係なく、手を右へ動かせば腕も画面の右へ動く。手先の目標は、アームの届く範囲の中に収める。
 """
 
@@ -110,11 +111,12 @@ class Robot:
     def rest_offset(self):
         return self.forward * (config.ARM_L1 + config.ARM_L2) * 0.55
 
-    def drive_arm(self, v_world, dt):
-        """デコードした速度（ワールド座標/秒）で手先を動かす"""
+    def drive_arm(self, v_world, dt, leak=None):
+        """デコードした速度（ワールド座標/秒）で手先を動かす。leak：待機の位置へ戻す強さ（既定は ARM_LEAK）"""
+        leak = config.ARM_LEAK if leak is None else leak
         if self.offset is None:
             self.offset = self.rest_offset.copy()
-        self.offset += np.asarray(v_world) * dt - config.ARM_LEAK * (self.offset - self.rest_offset) * dt
+        self.offset += np.asarray(v_world) * dt - leak * (self.offset - self.rest_offset) * dt
         r = np.linalg.norm(self.offset)
         r_min, r_max = abs(config.ARM_L1 - config.ARM_L2) * 1.3 + 0.02, (config.ARM_L1 + config.ARM_L2) * 0.97
         if r > r_max:

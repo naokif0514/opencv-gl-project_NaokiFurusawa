@@ -28,6 +28,7 @@ F11 で全画面 ⇔ ウィンドウを切りかえる。
 """
 
 import argparse
+import math
 import os
 import sys
 import time
@@ -105,7 +106,7 @@ class Game:
         self.robot = Robot()
         self.field = Field(self.rng)
         self.real_items = RealItemTracker()
-        self.hand_calib = HandCalibration()
+        self.hand_calib = HandCalibration(config.HC_PLAYER_AMPLITUDE)   # プレイヤーは小さくゆっくり
         self.grip_switch = GripSwitch()
         self.message, self.message_until = "", 0.0
         self.flash_until = 0.0           # 電極劣化の赤いフラッシュ
@@ -379,11 +380,13 @@ class Game:
                 acc += dt
                 steps = 0
                 while acc >= config.DT and steps < config.MAX_STEPS_PER_FRAME:
-                    self.cortex.step(hand.vel, g, hand.detected)
+                    # [A] 手の速度を HAND_INPUT_GAIN 倍してからニューロンへ（同期フェーズでも同じ倍率で学習する）
+                    vin = hand.vel * config.HAND_INPUT_GAIN
+                    self.cortex.step(vin, g, hand.detected)
                     if self.rival is not None and self.state == "play":
                         self.rival.neural_step()          # ライバル専用の擬似ニューロン（同じ 20 ms 刻み）
                     if self.hand_calib.active:
-                        if self.hand_calib.step(self.cortex.rate_hat, self.cortex.grip_rate_hat, hand.vel, g,
+                        if self.hand_calib.step(self.cortex.rate_hat, self.cortex.grip_rate_hat, vin, g,
                                                 hand.detected):
                             self.finish_hand_calib()
                     acc -= config.DT
@@ -560,7 +563,7 @@ class Game:
 
             # ---- 手 → アーム（デコードした速度）、握る → グリッパー（デコードした把持）----
             if not self.robot.moving:
-                self.robot.drive_arm(self.cortex.v_hat * config.ARM_VEL_GAIN, dt)
+                self.robot.drive_arm(self.arm_velocity(), dt)
             gd = self.cortex.grip
             ev = self.grip_switch.update(gd.value, gd.close_th, gd.open_th, dt)
             if ev is not None:
@@ -628,6 +631,17 @@ class Game:
             return
         self.record.mark(m.play_time, "freeze")
         self.notify(f"ライバルを止めた！（{config.FREEZE_SEC:.0f} 秒）")
+
+    def arm_velocity(self):
+        """
+        デコードした速度 → アームの手先の速度 [ワールド/秒]（プレイヤーだけ）：
+        HAND_INPUT_GAIN で割って手の速度の単位へ戻し、[C] 加速カーブ（手を止めているときは倍率を少し下げて、
+        ノイズでふらつかないように）を掛け、[E] ARM_VEL_GAIN 倍する
+        """
+        v = self.cortex.v_hat / config.HAND_INPUT_GAIN
+        s = float(np.linalg.norm(v))
+        curve = 1.0 - config.ARM_CURVE * math.exp(-s / max(config.ARM_CURVE_SPEED, 1e-6))
+        return v * config.ARM_VEL_GAIN * curve
 
     def on_grip_event(self, ev):
         m = self.mission
@@ -752,6 +766,7 @@ class Game:
             rival_holding=None if (m is None or self.rival is None) else
             (self.rival.held.type if self.rival.held is not None else ""),
             freezes=None if (m is None or self.rival is None) else self.rival.freezes,
+            hand_size=None if (self.vision is None or self.test_mode) else self.vision.get_state().hand_size,
             event=";".join(self.events))
         self.events = []
 

@@ -201,7 +201,7 @@ class Rival:
         sp = float(np.linalg.norm(vw))
         if sp > self.p["arm"]:
             vw *= self.p["arm"] / sp
-        self.intent_v = vw / config.ARM_VEL_GAIN
+        self.intent_v = vw / config.RIVAL_ARM_VEL_GAIN
         return float(np.linalg.norm(err))
 
     def _avoid(self, player):
@@ -324,7 +324,7 @@ class Rival:
 
         # アーム：台座が止まっているときだけ、デコードした速度で動かす（プレイヤーと同じ）
         if not r.moving:
-            r.drive_arm(self.cortex.v_hat * config.ARM_VEL_GAIN, dt)
+            r.drive_arm(self.cortex.v_hat * config.RIVAL_ARM_VEL_GAIN, dt, leak=config.RIVAL_ARM_LEAK)
 
         # グリッパー：デコードした把持の値で開閉する（プレイヤーと同じヒステリシス）
         gd = self.cortex.grip
