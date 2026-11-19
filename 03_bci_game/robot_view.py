@@ -112,6 +112,15 @@ ROBOT_MATERIALS = {
 }
 
 
+# ライバル（チャレンジ）の配色：白い塗装を赤に、光る線をオレンジに（プレイヤーの白・水色と補色に近い色）
+RIVAL_PALETTE = {
+    "panel":  ((0.86, 0.20, 0.17), "painted", 0.30, 0.0),
+    "accent": ((1.00, 0.52, 0.18), "plastic", 0.30, 0.85),
+    "warn":   ((0.95, 0.85, 0.25), "painted", 0.30, 0.0),
+}
+FROZEN_COLOR = (0.70, 0.88, 1.00)   # 止まっている（凍った）ときの色：青白く光る
+
+
 def load_obj(path):
     """OBJ（v / vn / f v//vn、g 部品.質感）を読み、{部品: [(質感, (vao, 個数)), ...]} を返す"""
     vs, ns, groups, cur = [], [], {}, None
@@ -153,16 +162,23 @@ class RobotView:
     WHEEL_POS = ((0.33, 1), (0.33, -1), (-0.33, 1), (-0.33, -1))   # (台座の長さに対する前後の位置, 右 = 1 / 左 = −1)
     FINGER_GAP = (0.0016, 0.0115) # 指の内側の面の、中心からの距離（閉じた, 開いた）
 
-    def __init__(self, scene):
+    def __init__(self, scene, palette=None):
+        """palette：質感の上書き（ライバルは RIVAL_PALETTE）"""
         self.s = scene
+        self.materials = {**ROBOT_MATERIALS, **(palette or {})}
+        self.frozen = 0.0             # 0〜1：凍った見た目の強さ（draw の引数で毎フレーム決める）
         self.parts = load_obj(MODEL_PATH)
         self.prev = None              # (位置, 向き)：車輪を回すため
         self.spin = {1: 0.0, -1: 0.0} # 右・左の車輪の回転角
 
     def _part(self, name, M, rot):
         s = self.s
+        f = self.frozen
         for mat, mesh in self.parts[name]:
-            color, material, spec, emissive = ROBOT_MATERIALS[mat]
+            color, material, spec, emissive = self.materials[mat]
+            if f > 0:                 # 凍った見た目：色を青白く寄せて光らせる
+                color = tuple(c * (1 - 0.75 * f) + fc * 0.75 * f for c, fc in zip(color, FROZEN_COLOR))
+                emissive = emissive + 0.45 * f
             s.draw(mesh, M, rot, color, emissive=emissive, spec=spec, material=material)
 
     def _update_wheels(self, robot):
@@ -178,10 +194,12 @@ class RobotView:
                 self.spin[side] += (fwd + side * dh * half) / self.WHEEL_R
         self.prev = (pos, hd)
 
-    def draw(self, robot, held_half=None):
-        """held_half：持っている物の表面までの距離（指をそこで止める。持っていなければ None）"""
+    def draw(self, robot, held_half=None, frozen=0.0):
+        """held_half：持っている物の表面までの距離（指をそこで止める。持っていなければ None）、frozen：凍った見た目 0〜1"""
         s = self.s
-        self._update_wheels(robot)
+        self.frozen = frozen
+        if frozen <= 0:               # 止まっている間は車輪も回さない
+            self._update_wheels(robot)
         L, Wd = config.ROBOT_BODY
         rot = rotate_y(robot.heading)
         base = translate(*s.to3d(robot.pos)) @ rot

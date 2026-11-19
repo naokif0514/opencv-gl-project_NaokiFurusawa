@@ -7,7 +7,7 @@ brain_record.py
     （手を動かす・握る → 運動野、握る → 体性感覚野、視線で選ぶ → 前頭眼野・視覚野）
   ・ラスターの一部：最後に物をつかんだ瞬間（なければ終了時）のラスター画像（直近 RASTER_SEC 秒）
   ・デコード精度の推移：ACCURACY_LOG_SEC 秒ごとの (プレイ時間, 相関係数, RMSE)
-  ・イベントの時刻：電極劣化、再同期の開始・終了
+  ・イベントの時刻：電極劣化、再同期の開始・終了、ライバルを止めた（見つめて止めた）時刻
 """
 
 import numpy as np
@@ -21,7 +21,7 @@ class BrainRecord:
         self.glow_sum = np.zeros(6)
         self.time = 0.0
         self.accuracy = []          # (t, corr, rmse)
-        self.marks = []             # (t, "degrade" / "recal_start" / "recal_end")
+        self.marks = []             # (t, "degrade" / "recal_start" / "recal_end" / "freeze")
         self.raster = None
         self.next_acc = 0.0
 

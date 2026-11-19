@@ -325,7 +325,9 @@ class GazeTracker:
 class DwellSelector:
     """
     注視点の近くの対象に吸い付き、DWELL_SEC 秒見つめ続けたら選ぶ。
-    対象は (id, 画面座標, 半径) のリストで毎フレーム渡す（アイテムは動くので）
+    対象は (id, 画面座標, 半径) または (id, 画面座標, 半径, 設定) のリストで毎フレーム渡す（アイテムは動くので）。
+    設定（dict）で、その対象だけ吸い付く範囲 "snap"・吸い付いたままにする範囲 "keep"・見つめる時間 "dwell" を変えられる
+    （チャレンジのライバル：物を見ているつもりで誤って止めないよう、範囲を狭く、時間を長くする）
     """
 
     def __init__(self):
@@ -345,19 +347,24 @@ class DwellSelector:
         """
         dwell_sec = config.DWELL_SEC if dwell_sec is None else dwell_sec
         best, best_d, best_pos = None, None, None
-        cur_d, cur_pos = None, None
+        cur_d, cur_pos, cur_opt = None, None, {}
+        opts = {}
         if gaze is not None:
-            for tid, pos, radius in targets:
+            for t in targets:
+                tid, pos, radius = t[:3]
+                opt = t[3] if len(t) > 3 else {}
+                opts[tid] = opt
                 d = np.linalg.norm(np.asarray(pos) - gaze) - radius
                 if tid == current:
                     d -= config.CURRENT_PULL_PX
                 if tid == self.focus:
-                    cur_d, cur_pos = d, pos
-                if d <= config.SNAP_PX and (best_d is None or d < best_d):
+                    cur_d, cur_pos, cur_opt = d, pos, opt
+                if d <= opt.get("snap", config.SNAP_PX) and (best_d is None or d < best_d):
                     best, best_d, best_pos = tid, d, pos
             # ヒステリシス：吸い付いている対象は、少し離れても（SNAP_PX + FOCUS_KEEP_PX まで）、
             # 別の対象がはっきり近く（FOCUS_SWITCH_PX 以上）ならないかぎり離さない
-            if cur_d is not None and cur_d <= config.SNAP_PX + config.FOCUS_KEEP_PX:
+            keep = cur_opt.get("snap", config.SNAP_PX) + cur_opt.get("keep", config.FOCUS_KEEP_PX)
+            if cur_d is not None and cur_d <= keep:
                 if best is None or best == self.focus or best_d > cur_d - config.FOCUS_SWITCH_PX:
                     best, best_d, best_pos = self.focus, cur_d, cur_pos
         if best is None or best == current:
@@ -370,7 +377,7 @@ class DwellSelector:
         if best != self.focus:
             self.focus, self.progress = best, 0.0
         self.focus_pos = best_pos
-        self.progress = min(1.0, self.progress + dt / dwell_sec)
+        self.progress = min(1.0, self.progress + dt / opts.get(best, {}).get("dwell", dwell_sec))
         if self.progress >= 1.0:
             chosen = self.focus
             self.reset()

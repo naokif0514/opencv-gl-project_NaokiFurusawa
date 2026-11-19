@@ -21,7 +21,8 @@ BCI オペレーター（ゲーム本体）。実際の BCI 研究の「ハイ�
     ../.venv/bin/python main.py --quality high   # 画質（light / standard / high。既定は GPU なら standard）
     ../.venv/bin/python main.py --light    # さらに軽く（画質 light + config.apply_light_mode）
     ../.venv/bin/python main.py --window   # ディスプレイいっぱいにせず、1280×720 のウィンドウで
-    ../.venv/bin/python main.py --no-degrade  # 電極劣化なし（ノーマル）で始める（タイトルの M / ← → でも切りかえ）
+    ../.venv/bin/python main.py --mode challenge --rival strong  # ライバルと対戦（強い）を選んだ状態で始める
+    ../.venv/bin/python main.py --degrade     # 電極劣化を起こす（以前のルール。どちらのモードでも）
     ../.venv/bin/python main.py --software # GPU を使わず、X11 互換モード + ソフトウェア描画で（以前の方式）
 F11 で全画面 ⇔ ウィンドウを切りかえる。
 """
@@ -57,6 +58,7 @@ from hand_tracker import MouseHand                                  # noqa: E402
 from items import RealItemTracker                                   # noqa: E402
 from layout import H, W, calib_points, check_points                 # noqa: E402
 from mission import GripSwitch, Mission, gripper_tip                # noqa: E402
+from rival import Rival, separate                                   # noqa: E402
 from robot import Robot                                             # noqa: E402
 from scene3d import Scene3D                                         # noqa: E402
 from vision import VisionThread                                     # noqa: E402
@@ -115,7 +117,10 @@ class Game:
         self.resume_play = False
         self.selected = None
         self.lock_time = -1e9          # 最後に行き先を決めた時刻（time.monotonic）
-        self.degrade_on = config.DEGRADE_ENABLED   # 電極劣化あり（チャレンジ）/ なし（ノーマル）。タイトルで切りかえる
+        self.game_mode = getattr(args, "mode", None) or "normal"   # "normal"（一人）/ "challenge"（ライバルと対戦）
+        self.rival_level = getattr(args, "rival", None) or config.RIVAL_LEVEL   # ライバルの強さ（タイトルで切りかえ）
+        self.rival = None                # チャレンジのライバル（rival.Rival）
+        self.last_bump = -1e9            # ぶつかって物を落とさせる判定をした時刻（プレイ時間）
         self.last_g = 0.0
         self.hand = None
         self.events = []
@@ -182,30 +187,50 @@ class Game:
         elif s == "hand_calib":
             self.hand_calib.start()
         elif s == "play":
-            self.mission = Mission(self.rng, degrade=self.degrade_on)
-            self.events.append(f"mode:{self.mode}")
+            self.mission = Mission(self.rng, degrade=config.DEGRADE_ENABLED)
+            self.events.append(f"mode:{self.score_key}")
+            self.last_bump = -1e9
+            if self.rival is not None:
+                self.rival.reset()
             self.record = BrainRecord()
             self.grip_switch = GripSwitch()
             self._prev_score = 0
             cam.yaw, cam.pitch, cam.goal_dist = -100.0, 30.0, 3.7
             cam.sway = (-105.0, 25.0)            # 「裏側」の脳は、左半球の外側面を見ながら ±25° 揺れる
-            print(f"[main] モード {self.mode}　電極劣化の予定（プレイ開始からの秒）: "
+            print(f"[main] モード {self.score_key}　電極劣化の予定（プレイ開始からの秒）: "
                   f"{[round(t) for t in self.mission.degrade_times]}")
         elif s == "result":
             self.finish_game()
 
     @property
     def mode(self):
-        """"challenge"（電極劣化あり）/ "normal"（劣化なし）"""
-        return "challenge" if self.degrade_on else "normal"
+        """"normal"（一人で集める）/ "challenge"（CPU のライバルと対戦）"""
+        return self.game_mode
+
+    @property
+    def score_key(self):
+        """ハイスコア・ログのモード名：normal / challenge_weak / challenge_normal / challenge_strong"""
+        return "normal" if self.game_mode == "normal" else f"challenge_{self.rival_level}"
 
     def set_mode(self, mode):
-        self.degrade_on = mode == "challenge"
+        self.game_mode = mode
+
+    def set_rival_level(self, level):
+        self.rival_level = level
 
     def start_game(self):
         self.build_cortex()
         self.robot.reset()
-        self.field.reset(self.robot.pos)
+        if self.game_mode == "challenge":
+            # ライバル：専用の擬似ニューロンを作り、同期フェーズを画面に出さずに模擬してデコーダを学習する（約 0.2 秒）
+            self.rival = Rival(self.rival_level, self.rng)
+            self.field.extra_avoid = [config.RIVAL_GOAL_POS]
+            self.field.reset(self.robot.pos, [self.rival.robot.pos])
+            print(f"[main] ライバル（{self.rival_level}）のデコーダを学習しました（r2 = {self.rival.calib_info['r2']:.2f}）")
+        else:
+            self.rival = None
+            self.field.extra_avoid = []
+            self.field.reset(self.robot.pos)
         self.selected = None
         self.lock_time = -1e9
         self.mission = None
@@ -237,7 +262,15 @@ class Game:
         elif self.state == "title" and key in (glfw.KEY_M, glfw.KEY_LEFT, glfw.KEY_RIGHT):
             # モードの切りかえ：← = ノーマル、→ = チャレンジ、M = 入れかえ
             self.set_mode({glfw.KEY_LEFT: "normal", glfw.KEY_RIGHT: "challenge"}.get(
-                key, "normal" if self.degrade_on else "challenge"))
+                key, "normal" if self.game_mode == "challenge" else "challenge"))
+        elif self.state == "title" and key in (glfw.KEY_1, glfw.KEY_2, glfw.KEY_3, glfw.KEY_UP, glfw.KEY_DOWN):
+            # ライバルの強さ：1 / 2 / 3（↑↓ で順に）。押すとチャレンジを選んだことにする
+            levels = list(config.RIVAL_LEVELS)
+            i = levels.index(self.rival_level)
+            i = {glfw.KEY_1: 0, glfw.KEY_2: 1, glfw.KEY_3: 2, glfw.KEY_UP: max(0, i - 1),
+                 glfw.KEY_DOWN: min(len(levels) - 1, i + 1)}[key]
+            self.set_rival_level(levels[i])
+            self.set_mode("challenge")
         elif key == glfw.KEY_T and self.vision is not None and self.state == "title":
             self.test_mode = not self.test_mode
         elif self.state == "gaze_calib" and key == glfw.KEY_ENTER and self.gaze.calib.can_skip:
@@ -289,8 +322,11 @@ class Game:
             if action == glfw.PRESS and self.state == "title":
                 p = self.mouse_layout()
                 mode = self.view.mode_button_hit(p)
+                level = self.view.level_button_hit(p)
                 if mode is not None:
                     self.set_mode(mode)
+                elif level is not None:
+                    self.set_rival_level(level)
                 elif self.view.start_button_hit(p):
                     self.start_game()
 
@@ -344,6 +380,8 @@ class Game:
                 steps = 0
                 while acc >= config.DT and steps < config.MAX_STEPS_PER_FRAME:
                     self.cortex.step(hand.vel, g, hand.detected)
+                    if self.rival is not None and self.state == "play":
+                        self.rival.neural_step()          # ライバル専用の擬似ニューロン（同じ 20 ms 刻み）
                     if self.hand_calib.active:
                         if self.hand_calib.step(self.cortex.rate_hat, self.cortex.grip_rate_hat, hand.vel, g,
                                                 hand.detected):
@@ -481,7 +519,8 @@ class Game:
                     self.events.append(f"bonus_drop:{r.color}")
                     self.notify("ボーナスが降ってきた！（高得点）")
 
-        self.field.update(dt, avoid=[self.robot.pos])
+        rv = self.rival
+        self.field.update(dt, avoid=[self.robot.pos] + ([rv.robot.pos] if rv is not None else []))
 
         selecting = 0.0
         if not self.recalibrating:
@@ -496,6 +535,13 @@ class Game:
                 p = self.scene.project(GOAL_POS, 0.03, SCENE_RECT)
                 if p is not None:
                     targets.append(("goal", p, self.scene.screen_radius(GOAL_POS, 0.0, config.GOAL_RADIUS, SCENE_RECT)))
+            # チャレンジ：ライバルを見つめて止める（物より吸い付く範囲を狭く、見つめる時間を長く）
+            if rv is not None and rv.can_freeze:
+                p = self.scene.project(rv.robot.pos, 0.06, SCENE_RECT)
+                if p is not None:
+                    targets.append(("rival", p, self.scene.screen_radius(rv.robot.pos, 0.06, 0.05, SCENE_RECT),
+                                    {"snap": config.RIVAL_SNAP_PX, "keep": config.RIVAL_KEEP_PX,
+                                     "dwell": config.FREEZE_DWELL_SEC}))
             # 行き先を決めたあと、まだつかんでいない物から別の物へ乗り換えるには長く見つめる必要がある。
             # 決めた直後（LOCK_COOLDOWN 秒）は次の選択を受け付けない（視線の揺れで行き先がすぐ変わらないように）
             switching = m.held is None and isinstance(self.selected, int)
@@ -505,7 +551,9 @@ class Game:
             else:
                 chosen = None
                 self.dwell.reset()
-            if chosen is not None:
+            if chosen == "rival":
+                self.freeze_rival()
+            elif chosen is not None:
                 self.select(chosen)
             if self.dwell.focus is not None:
                 selecting = 0.4 + 0.6 * self.dwell.progress
@@ -522,12 +570,64 @@ class Game:
 
         if m.held is not None:                     # つかんでいる物はグリッパーといっしょに動く
             m.held.pos = gripper_tip(self.robot)
+        if rv is not None:
+            self.update_rival(dt)
 
         if m.done:
             self.recalibrating = False
             self.hand_calib.cancel()
             self.set_state("result")
         return selecting
+
+    # --------------------------------------------------------
+    # チャレンジ：ライバル
+    # --------------------------------------------------------
+    def player_target(self):
+        """プレイヤーがロックオンしている物（なければ None）"""
+        if isinstance(self.selected, int):
+            return next((i for i in self.field.items if i.id == self.selected), None)
+        return None
+
+    def update_rival(self, dt):
+        """ライバルを動かし、横取り・ロボットどうしの押し合い・ぶつかって落とす判定をする"""
+        m, rv = self.mission, self.rival
+        target = self.player_target()
+        grabbed = rv.update(dt, self.field, self.robot, target)
+        rv.robot.update(dt)
+        if grabbed is not None and grabbed is target:            # プレイヤーが狙っていた物を取られた
+            rv.steals += 1
+            self.selected = None
+            self.robot.stop()
+            self.events.append(f"rival_stole:{grabbed.id}")
+            m.log(f"rival_stole:{grabbed.type}")
+            self.notify(f"{grabbed.spec['name']}をライバルに取られた！ 別の物を見つめる")
+        # ロボットどうしは重ならない（止まっているライバルは動かない）
+        separate(self.robot, rv.robot, b_fixed=rv.frozen)
+        # 運んでいる途中でライバルにぶつかられると、強さに応じた確率で落とす（BUMP_COOLDOWN 秒に 1 回だけ判定）
+        d = float(np.linalg.norm(self.robot.pos - rv.robot.pos))
+        if (m.held is not None and d < config.BUMP_DIST and not rv.frozen and rv.robot.speed > 0.02
+                and m.play_time - self.last_bump >= config.BUMP_COOLDOWN):
+            self.last_bump = m.play_time
+            if self.rng.random() < rv.p["bump"]:
+                it = m.knock_off(gripper_tip(self.robot))
+                self.selected = None
+                self.events.append(f"bump_drop:{it.type}")
+                self.notify(f"ライバルにぶつかられて{it.spec['name']}を落とした！（床に残っている。コンボはそのまま）")
+            else:
+                self.events.append("bump_safe")
+                m.log("bump_safe")
+        for e in rv.events:
+            self.events.append(e)
+            m.log(e)
+        rv.events = []
+
+    def freeze_rival(self):
+        """ライバルを見つめ続けた：FREEZE_SEC 秒止める"""
+        rv, m = self.rival, self.mission
+        if rv is None or not rv.freeze():
+            return
+        self.record.mark(m.play_time, "freeze")
+        self.notify(f"ライバルを止めた！（{config.FREEZE_SEC:.0f} 秒）")
 
     def on_grip_event(self, ev):
         m = self.mission
@@ -577,18 +677,29 @@ class Game:
         self.robot.approach(pos)
         self.robot.offset = None
         self.events.append(f"lock:{chosen}")
+        if self.rival is not None and chosen != "goal":
+            self.rival.on_player_lock(it, self.robot)     # 強さに応じた確率で横取りしにくる
 
     def finish_game(self):
         """ゲーム終了：ハイスコアに加え、結果画面の振り返りを用意する"""
         m = self.mission
         if self.record.raster is None:
             self.record.snapshot_raster(self.cortex.raster)
-        scores, rank = highscore.add(m.result.score, m.result.collected, self.mode)
+        scores, rank = highscore.add(m.result.score, m.result.collected, self.score_key)
         self.final = {"result": m.result, "scores": scores, "rank": rank, "record": self.record, "mode": self.mode,
-                      "usage": self.record.usage()}
+                      "key": self.score_key, "usage": self.record.usage(), "rival": None}
+        rv = self.rival
+        if rv is not None:
+            me, them = m.result.score, rv.score
+            outcome = "win" if me > them else ("lose" if me < them else "draw")
+            self.final["rival"] = {"level": rv.level, "score": them, "collected": rv.collected, "outcome": outcome,
+                                   "freezes": rv.freezes, "steals": rv.steals, "knocked": m.result.knocked}
+            self.events.append(f"match_end:{outcome}:{me}-{them}:freezes={rv.freezes}")
         self.events.append(f"game_end:score={m.result.score}:collected={m.result.collected}")
         print(f"[main] 終了：スコア {m.result.score}、集めた数 {m.result.collected}、失敗 {m.result.failures}、"
-              f"順位 {None if rank is None else rank + 1}")
+              f"順位 {None if rank is None else rank + 1}"
+              + ("" if rv is None else f"、ライバル（{rv.level}）{rv.score}（{rv.collected} 個）→ "
+                 f"{self.final['rival']['outcome']}、止めた回数 {rv.freezes}"))
         # 結果画面の脳：プレイ中にどれだけ使ったかで光らせる
         self.brain.glow[:] = 0
         self.brain.update_glow(self.final["usage"], 10.0)
@@ -631,7 +742,17 @@ class Game:
             degrade_count=None if m is None else m.degrade_count,
             collected=None if m is None else m.result.collected, score=None if m is None else m.result.score,
             score_delta=delta, combo=None if m is None else m.combo_mult,
-            time_left=None if m is None else m.time_left, event=";".join(self.events))
+            time_left=None if m is None else m.time_left,
+            rival_level=None if self.rival is None else self.rival.level,
+            rival_x=None if (m is None or self.rival is None) else float(self.rival.robot.pos[0]),
+            rival_y=None if (m is None or self.rival is None) else float(self.rival.robot.pos[1]),
+            rival_state=None if (m is None or self.rival is None) else
+            ("frozen" if self.rival.frozen else self.rival.state),
+            rival_score=None if (m is None or self.rival is None) else self.rival.score,
+            rival_holding=None if (m is None or self.rival is None) else
+            (self.rival.held.type if self.rival.held is not None else ""),
+            freezes=None if (m is None or self.rival is None) else self.rival.freezes,
+            event=";".join(self.events))
         self.events = []
 
     def update_debug_window(self):
@@ -652,13 +773,16 @@ def main():
     parser.add_argument("--light", action="store_true",
                         help="さらに軽くする（重い PC 向け。画質は light にしたうえで解像度・カメラ処理も減らす）")
     parser.add_argument("--window", action="store_true", help="1280×720 のウィンドウで開く")
-    parser.add_argument("--no-degrade", action="store_true",
-                        help="電極劣化なし（ノーマル）で始める（タイトル画面でも切りかえられる）")
+    parser.add_argument("--mode", choices=("normal", "challenge"), default=None,
+                        help="最初に選んでおくモード（normal = 一人で集める、challenge = ライバルと対戦。タイトルでも切りかえ）")
+    parser.add_argument("--rival", choices=tuple(config.RIVAL_LEVELS), default=None,
+                        help="チャレンジのライバルの強さ（タイトルでも切りかえ）")
+    parser.add_argument("--degrade", action="store_true", help="電極劣化を起こす（以前のルール。どちらのモードでも）")
     parser.add_argument("--software", action="store_true",
                         help="GPU を使わず、X11 互換モード + ソフトウェア描画で開く（以前の方式）")
     args = parser.parse_args()
-    if args.no_degrade:
-        config.DEGRADE_ENABLED = False
+    if args.degrade:
+        config.DEGRADE_ENABLED = True
     quality = args.quality or config.QUALITY
     if args.light or config.LIGHT_MODE:
         quality = "light"

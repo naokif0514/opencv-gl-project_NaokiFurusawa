@@ -61,3 +61,14 @@ fps（テストモード、上限なし、変更前と後を交互に 2 回ず�
 | `shadows_4_after_arm_closeup_standard.png` | 変更後（拡大、standard）：腕の影が腕についていく |
 | `shadows_5_after_arm_closeup_high.png` | 変更後（拡大、high）：腕・関節・グリッパーの形の影 |
 | `shadows_6_compare_arm_holding.png` | 腕を伸ばして玉を持った状態の比較（上 = 変更前、下 = 変更後。左 = standard、右 = high）。持ち上げた玉の影は小さく薄い |
+
+## チャレンジ：ライバルとの対戦
+
+テストモードのボット（マウス）とライバル（普通）の対戦で撮った（画質 standard）。
+
+| ファイル | 内容 |
+|---|---|
+| `challenge_0_title.png` | タイトル画面：チャレンジを選ぶと、左にルールの説明とライバルの強さ（弱い・普通・強い）が出る |
+| `challenge_1_play.png` | 対戦中：赤いライバルと、奥の左のライバルのカゴ（オレンジの縁）。HUD に RIVAL のスコアと状態 |
+| `challenge_2_frozen.png` | ライバルを見つめて止めたところ：青白く凍った見た目、上に FROZEN と残り時間 |
+| `challenge_3_result.png` | 結果画面：勝ち負け、両者のスコア、止めた回数。精度のグラフの水色の線 = ライバルを止めた時刻 |

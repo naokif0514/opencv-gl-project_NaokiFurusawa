@@ -21,11 +21,13 @@ from OpenGL import GL as gl
 import config
 from gfx2d import rotate_z, scale, translate
 from gl_utils import ShaderProgram, look_at, perspective
-from robot_view import Meshes, RobotView, load_obj, rotate_y
+from robot_view import RIVAL_PALETTE, Meshes, RobotView, load_obj, rotate_y
 from shadows import ShadowDecals, ShadowMap, light_shift
 
 LIGHT_DIR = np.array([-0.45, 1.0, 0.55])
 BASKET_COLOR = (0.75, 0.45, 0.18)
+RIVAL_BASKET_COLOR = (0.70, 0.22, 0.18)   # ライバルのカゴ（画質 light の色）
+RIVAL_RIM = (1.00, 0.45, 0.20)            # ライバルのカゴの光る線（オレンジ）
 
 # 質感（画質 standard / high の新しいシェーダー用）：名前 → (鏡面反射の強さ, 鋭さ, 金属らしさ)
 # light（以前のシェーダー）では使わず、draw() の spec だけを使う
@@ -78,6 +80,8 @@ class Scene3D:
         self.shader = ShaderProgram("scene.vert", "scene_hq.frag" if self.full else "scene.frag")
         self.meshes = Meshes()
         self.robot_view = RobotView(self)
+        self.rival_view = RobotView(self, RIVAL_PALETTE)   # チャレンジのライバル（赤）
+        self.rim_color = config.BASKET_RIM_HQ              # 今描いているカゴの光る線の色
         # 画質 standard / high では作り込んだ物・カゴのモデル、light では以前の簡単な形（重さを変えないため）
         self.item_models = load_obj(ITEM_MODEL_PATH) if self.full else None
         # 影：light = 楕円、standard = 柔らかい影の画像、high = シャドウマップ + 薄い接地の影（shadows.py）
@@ -178,7 +182,7 @@ class Scene3D:
                 elif role == "bottom":
                     color = tuple(v * 0.55 for v in config.BASKET_COLOR_HQ)
                 elif role == "rim":
-                    color = config.BASKET_RIM_HQ
+                    color = self.rim_color
             self.draw(mesh, M, rot, color, emissive=emissive, material=material)
 
     def _item_model(self, it, t, selected):
@@ -259,19 +263,26 @@ class Scene3D:
                 self.draw(self.meshes.cube, translate(*c) @ rr @ scale(r, r * 0.35, r), rr, spec["rgb"],
                           emissive=(pulse + glow) * (0.6 if self.full else 1.0), spec=0.9, material=mat)
 
-    def _basket(self):
+    def _baskets(self, rival):
+        """カゴ：プレイヤーのカゴ（水色の縁）と、チャレンジならライバルのカゴ（オレンジの縁）"""
+        self._basket(config.GOAL_POS, config.BASKET_RIM_HQ, BASKET_COLOR)
+        if rival is not None:
+            self._basket(config.RIVAL_GOAL_POS, RIVAL_RIM, RIVAL_BASKET_COLOR)
+
+    def _basket(self, pos=config.GOAL_POS, rim=config.BASKET_RIM_HQ, light_color=BASKET_COLOR):
         """ゴールのカゴ：底と 4 枚の壁（上が開いた箱）"""
-        g = np.asarray(config.GOAL_POS)
+        g = np.asarray(pos)
+        self.rim_color = rim
         R = config.GOAL_RADIUS * 0.92
         hgt = 0.045
         th = 0.006
         c = self.to3d(g, 0.004)
         I = np.identity(4, dtype=np.float32)
         if self.item_models is not None:      # 作り込んだカゴ（網目・ふち・光る線）
-            g3 = self.to3d(np.asarray(config.GOAL_POS), 0.0)
+            g3 = self.to3d(g, 0.0)
             self._model_parts("basket", translate(*g3), np.identity(4, dtype=np.float32))
             return
-        wall = config.BASKET_COLOR_HQ if self.full else BASKET_COLOR
+        wall = config.BASKET_COLOR_HQ if self.full else light_color
         bottom = tuple(v * 0.55 for v in config.BASKET_COLOR_HQ) if self.full else (0.35, 0.22, 0.10)
         self.draw(self.meshes.cube, translate(*c) @ scale(R, 0.004, R), I, bottom, material="painted")
         for dx, dz, sx, sz in ((R, 0, th, R), (-R, 0, th, R), (0, R, R, th), (0, -R, R, th)):
@@ -282,7 +293,7 @@ class Scene3D:
                 rc = c + np.array([dx, hgt + 0.001, dz])
                 self.draw(self.meshes.cube, translate(*rc) @ scale(max(sx * 0.6, 0.0035) if sx < R else sx, 0.001,
                                                                   max(sz * 0.6, 0.0035) if sz < R else sz), I,
-                          config.BASKET_RIM_HQ, emissive=0.6, material="plastic")
+                          rim, emissive=0.6, material="plastic")
 
     def _table(self):
         I = np.identity(4, dtype=np.float32)
@@ -317,19 +328,27 @@ class Scene3D:
         s.set_float("uExposure", config.EXPOSURE)
 
     # --------------------------------------------------------
-    def _draw_objects(self, robot, items, held, t, selected):
+    def _bots(self, robot, held, rival):
+        """描くロボットの一覧：(Robot, RobotView, 持っている物, 凍った見た目 0〜1)"""
+        bots = [(robot, self.robot_view, held, 0.0)]
+        if rival is not None:
+            bots.append((rival.robot, self.rival_view, rival.held, min(1.0, rival.frozen_t / 0.25)))
+        return bots
+
+    def _draw_objects(self, bots, items, t, selected):
         """物・ロボット・持っている物を描く（シャドウマップを作るときにも同じものを描く）"""
         for it in items:
             if not it.held:
                 self._item(it, t, selected == it.id)
-        # 持っている物の表面の、つかむ位置からの距離（指をそこで止める）：箱は半分の幅、ほかは半径
-        held_half = None if held is None else held.radius * (0.85 if held.spec["shape"] == "cube" else 1.0)
-        self.robot_view.draw(robot, held_half)
-        if held is not None:                       # つかんでいる物：グリッパーの先、アームの高さの少し下
-            saved = held.height
-            held.height = RobotView.ARM_HEIGHT - held.radius * 1.2
-            self._item(held, t)
-            held.height = saved
+        for robot, view, held, frozen in bots:
+            # 持っている物の表面の、つかむ位置からの距離（指をそこで止める）：箱は半分の幅、ほかは半径
+            held_half = None if held is None else held.radius * (0.85 if held.spec["shape"] == "cube" else 1.0)
+            view.draw(robot, held_half, frozen)
+            if held is not None:                   # つかんでいる物：グリッパーの先、アームの高さの少し下
+                saved = held.height
+                held.height = RobotView.ARM_HEIGHT - held.radius * 1.2
+                self._item(held, t)
+                held.height = saved
 
     def _shadow_point(self, p, h, contact):
         """ワールド座標の点 p（高さ h）の影の中心（3D の x, z）。接地の影（contact）はずらさない"""
@@ -337,7 +356,7 @@ class Scene3D:
         sx, sz = (0.0, 0.0) if contact else light_shift(h)
         return (c[0] + sx, c[2] + sz)
 
-    def _build_decals(self, robot, items, held, contact):
+    def _build_decals(self, bots, items, rival, contact):
         """
         柔らかい影の四角形を作る。contact = True（画質 high）のときは、シャドウマップの影に重ねる
         薄い「接地の影」だけ（机に接している物の真下）
@@ -348,7 +367,8 @@ class Scene3D:
         arm_h = RobotView.ARM_HEIGHT
         center_h = {"cube": 0.85, "cylinder": 1.3, "sphere": 1.0, "star": 1.3}
         # ---- 物：持ち上げる（床から離れる）ほど、影は小さく薄くなる ----
-        for it in list(items) + ([held] if held is not None and held not in items else []):
+        helds = [h for _, _, h, _ in bots if h is not None and h not in items]
+        for it in list(items) + helds:
             r = it.radius
             lift = arm_h - r * 1.2 if it.held else it.height
             if contact and lift > 0.01:
@@ -359,8 +379,13 @@ class Scene3D:
             d.blob(self._shadow_point(it.pos, ch * 0.6, contact), size, alpha)
         # ---- カゴ ----
         R = config.GOAL_RADIUS * 0.92
-        d.rect(self._shadow_point(np.asarray(config.GOAL_POS), 0.02, contact), (1.0, 0.0), R + 0.008, R + 0.008,
-               0.016, 0.42 * k)
+        for g in [config.GOAL_POS] + ([config.RIVAL_GOAL_POS] if rival is not None else []):
+            d.rect(self._shadow_point(np.asarray(g), 0.02, contact), (1.0, 0.0), R + 0.008, R + 0.008, 0.016,
+                   0.42 * k)
+        for robot, _, _, _ in bots:
+            self._robot_decals(d, robot, contact, k, arm_h)
+
+    def _robot_decals(self, d, robot, contact, k, arm_h):
         # ---- ロボットの車体（向きに合わせて回した角の丸い長方形）----
         L, Wd = config.ROBOT_BODY
         fw = (math.cos(robot.heading), -math.sin(robot.heading))       # ワールドの向き → 3D の (x, z)
@@ -384,8 +409,9 @@ class Scene3D:
         d.blob(self._shadow_point(pose.elbow, arm_h, False), 0.017, 0.22)
         d.blob(self._shadow_point(tip, arm_h, False), 0.019, 0.30)
 
-    def render(self, viewport, robot, items, held, t, dt, selected=None):
-        """viewport：glViewport の値（左下原点、画素）"""
+    def render(self, viewport, robot, items, held, t, dt, selected=None, rival=None):
+        """viewport：glViewport の値（左下原点、画素）。rival：チャレンジのライバル（rival.Rival。なければ None）"""
+        bots = self._bots(robot, held, rival)
         gl.glViewport(*viewport)
         self.update_camera(robot, dt, viewport[2] / max(viewport[3], 1))
 
@@ -393,8 +419,8 @@ class Scene3D:
         if self.shadow_mode == "map":
             main = self.shader
             self.shader = self.shadow_map.begin()
-            self._basket()
-            self._draw_objects(robot, items, held, t, None)
+            self._baskets(rival)
+            self._draw_objects(bots, items, t, None)
             self.shader = main
             self.shadow_map.end()
             gl.glViewport(*viewport)
@@ -414,28 +440,29 @@ class Scene3D:
                 s.set_int("uShadowOn", 0)
 
         self._table()
-        self._basket()
+        self._baskets(rival)
 
         # ---- 影（半透明。深度は書かない）----
         gl.glEnable(gl.GL_BLEND)
         gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
         gl.glDepthMask(gl.GL_FALSE)
         if self.decals is None:                    # light：半透明の楕円（以前のまま）
-            self._shadow(robot.pos, 0.075)
+            for r, _, h, _ in bots:
+                self._shadow(r.pos, 0.075)
+                if h is not None:
+                    self._shadow(h.pos, h.radius * 1.2, 0.6)
             for it in items:
                 if not it.held:
                     self._shadow(it.pos, it.radius * 1.3, 1.0 - min(1.0, it.height / 0.6))
-            if held is not None:
-                self._shadow(held.pos, held.radius * 1.2, 0.6)
         else:                                      # standard：柔らかい影の画像、high：薄い接地の影
-            self._build_decals(robot, items, held, contact=self.shadow_map is not None)
+            self._build_decals(bots, items, rival, contact=self.shadow_map is not None)
             self.decals.draw(self.view, self.proj)
             s.use()
         gl.glDepthMask(gl.GL_TRUE)
         gl.glDisable(gl.GL_BLEND)
 
         # ---- 物とロボット ----
-        self._draw_objects(robot, items, held, t, selected)
+        self._draw_objects(bots, items, t, selected)
 
         # ---- ボーナスの光（加算合成。深度は書かない）----
         if self.item_models is not None:

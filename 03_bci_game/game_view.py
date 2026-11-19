@@ -47,9 +47,22 @@ GOLD = (255, 225, 120)
 MAGENTA = (255, 150, 230)
 TITLE_BRAIN = (290, 96, 700, 420)
 START_BUTTON = (W / 2 - 170, 604, 340, 56)
-# タイトル画面のモードの選択（ノーマル = 電極劣化なし、チャレンジ = 劣化あり）
+# タイトル画面のモードの選択（ノーマル = 一人で集める、チャレンジ = CPU のライバルと対戦）
 MODE_BUTTONS = {"normal": (W / 2 - 215, 550, 210, 46), "challenge": (W / 2 + 5, 550, 210, 46)}
-MODE_TEXT = {"normal": ("NORMAL", "ノーマル　電極劣化なし"), "challenge": ("CHALLENGE", "チャレンジ　電極劣化あり")}
+MODE_TEXT = {"normal": ("NORMAL", "ノーマル　一人で集める"), "challenge": ("CHALLENGE", "チャレンジ　ライバルと対戦")}
+# タイトル画面の左のルールの説明と、チャレンジのライバルの強さのボタン
+RULE_CARD = (28, 150, 262, 380)
+LEVEL_BUTTONS = {"weak": (44, 404, 230, 34), "normal": (44, 442, 230, 34), "strong": (44, 480, 230, 34)}
+RULES = {
+    "normal": ["120 秒で、物をできるだけ多くカゴへ", "小さい物・遠い物ほど高得点",
+               "続けて成功するとコンボで点が増える"],
+    "challenge": ["120 秒で、ライバル（赤）より", "多く点を取れば勝ち",
+                  "ライバルも擬似 BCI で動く", "（たまにつかみ損ねる）",
+                  "ライバルを約 1.5 秒見つめると止まる", "狙った物を横取りしにくる",
+                  "運んでいるときにぶつかられると", "落とすことがある"],
+}
+RIVAL_RED = (255, 120, 95)
+ICE = (180, 230, 255)
 SCENE_RECT = (0, 0, W, H)
 HUD = config.HUD_HEIGHT
 STEPS = ["物を約 1 秒見つめる → ロボットが近づく", "手を動かしてアームを伸ばし、手を握ってつかむ",
@@ -84,6 +97,15 @@ class GameView:
         x, y, w, h = self.rt.letterbox(ww, wh)
         return np.array([(mx - x) / max(w, 1) * W, (my - y) / max(h, 1) * H])
 
+    def level_button_hit(self, p):
+        """タイトル画面のライバルの強さのボタンの上なら、その強さ（チャレンジを選んでいるときだけ）"""
+        if self.g.mode != "challenge":
+            return None
+        for lv, (x, y, w, h) in LEVEL_BUTTONS.items():
+            if x <= p[0] <= x + w and y <= p[1] <= y + h:
+                return lv
+        return None
+
     def mode_button_hit(self, p):
         """タイトル画面のモードのボタンの上なら、そのモード（"normal" / "challenge"）"""
         for mode, (x, y, w, h) in MODE_BUTTONS.items():
@@ -94,7 +116,7 @@ class GameView:
     def _degrade_mode(self):
         """電極劣化ありのモードか（プレイ中はそのゲームのモード、それ以外はタイトルで選んでいるモード）"""
         m = self.g.mission
-        return m.degrade_enabled if m is not None else self.g.degrade_on
+        return m.degrade_enabled if m is not None else config.DEGRADE_ENABLED
 
     def start_button_hit(self, p):
         x, y, w, h = START_BUTTON
@@ -194,6 +216,12 @@ class GameView:
                 b.rect(x, y, w, h, (*[c * (0.35 if on else 0.08) for c in acc], 0.9))
                 for yy in (y, y + h - 2):
                     b.rect(x, yy, w, 2, (*acc, 1.0 if on else 0.3))
+            self._card(RULE_CARD, (1.0, 0.45, 0.3) if self.g.mode == "challenge" else (0.4, 0.9, 0.6), 0.85)
+            if self.g.mode == "challenge":                        # ライバルの強さ
+                for lv, (x, y, w, h) in LEVEL_BUTTONS.items():
+                    on = lv == self.g.rival_level
+                    b.rect(x, y, w, h, (0.85, 0.25, 0.2, 0.55) if on else (0.2, 0.08, 0.08, 0.6))
+                    b.rect(x, y, 3, h, (1.0, 0.5, 0.35, 1.0 if on else 0.3))
         else:
             k = min(1.0, self.g.state_t / config.MORPH_SEC)
             b.rect(W / 2 - 200, 610, 400, 8, (0.15, 0.2, 0.3, 1))
@@ -219,6 +247,21 @@ class GameView:
                 self._jt(img, ("▶ " if on else "") + en, en, x + w / 2, y + 5, 16, col, "center", font="tech", bold=True,
                          tracking=0.2)
                 self._jt(img, ja, en, x + w / 2, y + 25, 12, col, "center")
+            # ルールの説明（左のカード）と、チャレンジならライバルの強さ
+            mode = g.mode
+            x0, y0 = RULE_CARD[0] + 16, RULE_CARD[1] + 14
+            self._label(img, "RULES", "ルール", x0, y0, (255, 170, 140) if mode == "challenge" else GOOD, 14)
+            for i, line in enumerate(RULES[mode]):
+                self._jt(img, line, "rule", x0, y0 + 32 + i * 22, 13, INK if not line.startswith("（") else DIM)
+            if mode == "challenge":
+                self._jt(img, "RIVAL LEVEL  ―  1 / 2 / 3", "", x0, LEVEL_BUTTONS["weak"][1] - 26, 12, DIM,
+                         font="tech", tracking=0.15)
+                for lv, (x, y, w, h) in LEVEL_BUTTONS.items():
+                    on = lv == g.rival_level
+                    en, ja = config.RIVAL_LEVEL_NAMES[lv]
+                    self._jt(img, ("▶ " if on else "") + en, en, x + 14, y + 7, 15, (255, 255, 255) if on else DIM,
+                             font="tech", bold=True, tracking=0.2)
+                    self._jt(img, ja, en, x + w - 12, y + 9, 13, (255, 255, 255) if on else DIM, "right")
             self._jt(img, "SPACE / CLICK", "", W / 2, START_BUTTON[1] + 33, 13, ACCENT, "center", font="tech",
                      tracking=0.3)
             if g.test_mode:
@@ -227,8 +270,8 @@ class GameView:
             else:
                 self._jt(img, "CAMERA MODE  ―  顔と右手をカメラに映す", "", W / 2, 522, 15, GOOD, "center", font="tech",
                          tracking=0.08)
-            keys = ("M / ← →  MODE     T  CAMERA / TEST     F11  FULLSCREEN     ESC  QUIT" if g.vision is not None
-                    else "M / ← →  MODE     F11  FULLSCREEN     ESC  QUIT")
+            keys = ("M / ← →  MODE     1 / 2 / 3  RIVAL     T  CAMERA / TEST     F11  FULLSCREEN     ESC  QUIT"
+                    if g.vision is not None else "M / ← →  MODE     1 / 2 / 3  RIVAL     F11  FULLSCREEN     ESC  QUIT")
             self._jt(img, keys, keys, W / 2, 674, 13, DIM, "center", font="tech", tracking=0.2)
         else:
             self._jt(img, "LINKING TO CORTEX", "", W / 2, 556, 26, ACCENT, "center", font="display", tracking=0.18)
@@ -245,7 +288,7 @@ class GameView:
         m = g.mission
         held = m.held if m is not None else None
         sel = g.selected if isinstance(g.selected, int) else None
-        g.scene.render(self._vp(*SCENE_RECT), g.robot, g.field.items, held, t, dt, sel)
+        g.scene.render(self._vp(*SCENE_RECT), g.robot, g.field.items, held, t, dt, sel, rival=g.rival)
         self._full_viewport()
 
         if g.state == "play" and not g.recalibrating:
@@ -254,7 +297,10 @@ class GameView:
             if tip is not None:
                 b.ring(*tip, 9, 2, (1.0, 0.9, 0.4, 0.9), 18)
             if g.dwell.focus is not None and g.dwell.focus_pos is not None:
-                self._progress_ring(g.dwell.focus_pos, 34, g.dwell.progress, (1.0, 0.85, 0.3))
+                if g.dwell.focus == "rival":         # ライバルを見つめている：青白いリング（たまると止まる）
+                    self._progress_ring(g.dwell.focus_pos, 44, g.dwell.progress, (0.65, 0.9, 1.0))
+                else:
+                    self._progress_ring(g.dwell.focus_pos, 34, g.dwell.progress, (1.0, 0.85, 0.3))
             if g.selected == "goal":
                 p = g.scene.project(np.array(config.GOAL_POS), 0.05, SCENE_RECT)
                 if p is not None:
@@ -429,20 +475,17 @@ class GameView:
             y = 352 + (i // 2) * 26
             b.rect(x + 100, y + 4, 150, 10, (0.15, 0.17, 0.24, 1))
             b.rect(x + 100, y + 4, 150 * v, 10, (*REGION_COLORS[name], 1))
-        # デコード精度の推移（相関係数）と、劣化・再同期の時刻
+        # デコード精度の推移（相関係数）と、劣化・再同期・ライバルを止めた時刻
         gx, gy, gw, gh = 660, 530, 560, 110
         b.rect(gx, gy, gw, gh, (0.06, 0.07, 0.11, 1))
         for v in (0.25, 0.5, 0.75):
             b.line(gx, gy + gh * (1 - v), gx + gw, gy + gh * (1 - v), 1, (0.18, 0.21, 0.3, 1))
         rec = f["record"]
         tmax = max(config.GAME_TIME, 1.0)
-        challenge = f.get("mode", "challenge") == "challenge"
-        for tt, what in rec.marks:
-            if what == "degrade" and not challenge:       # ノーマル（劣化なし）では劣化の印を出さない
-                continue
+        for tt, what in rec.marks:                    # 劣化の印は、劣化が起きたとき（DEGRADE_ENABLED）だけある
             x = gx + gw * tt / tmax
-            col = (1.0, 0.3, 0.25, 0.95) if what == "degrade" else (1.0, 0.45, 0.85, 0.8)
-            b.line(x, gy, x, gy + gh, 2 if what == "degrade" else 1.5, col)
+            col = {"degrade": (1.0, 0.3, 0.25, 0.95), "freeze": (0.65, 0.9, 1.0, 0.9)}.get(what, (1.0, 0.45, 0.85, 0.8))
+            b.line(x, gy, x, gy + gh, 2 if what in ("degrade", "freeze") else 1.5, col)
         pts = [(gx + gw * tt / tmax, gy + gh * (1 - min(max(c, 0), 1))) for tt, c, _ in rec.accuracy if c is not None]
         for p, q in zip(pts[:-1], pts[1:]):
             b.line(*p, *q, 2, (0.35, 0.65, 1.0, 1))
@@ -459,13 +502,28 @@ class GameView:
         f = self.g.final
         r = f["result"]
         self._label(img, "RESULT", "結果", 50, 46)
-        self._jt(img, f"{r.score}", f"{r.score}", 300, 74, 66, GOLD, "center", font="display", bold=True)
-        self._jt(img, "PTS", "", 430, 120, 18, GOLD, font="tech", tracking=0.2)
         by = "　".join(f"{v['name']} {r.by_type.get(k, 0)}" for k, v in config.ITEM_TYPES.items())
-        self._jt(img, f"集めた数 {r.collected}（{by}）", "collected", 310, 170, 16, INK, "center")
-        self._jt(img, f"最高コンボ ×{r.max_combo:.1f}　　失敗 {r.failures}", "combo", 310, 198, 16, INK, "center")
+        rv = f.get("rival")
+        if rv is None:
+            self._jt(img, f"{r.score}", f"{r.score}", 300, 74, 66, GOLD, "center", font="display", bold=True)
+            self._jt(img, "PTS", "", 430, 120, 18, GOLD, font="tech", tracking=0.2)
+            self._jt(img, f"集めた数 {r.collected}（{by}）", "collected", 310, 170, 16, INK, "center")
+            self._jt(img, f"最高コンボ ×{r.max_combo:.1f}　　失敗 {r.failures}", "combo", 310, 198, 16, INK, "center")
+        else:                                  # チャレンジ：勝ち負けと両者のスコア、止めた回数
+            out_en, out_ja, out_col = {"win": ("YOU WIN", "勝ち", GOLD), "lose": ("YOU LOSE", "負け", RIVAL_RED),
+                                       "draw": ("DRAW", "引き分け", INK)}[rv["outcome"]]
+            self._jt(img, out_en, out_ja, 310, 64, 44, out_col, "center", font="display", bold=True, tracking=0.1)
+            self._jt(img, f"{r.score}", "", 220, 122, 28, GOLD, "right", font="display", bold=True)
+            self._jt(img, "VS", "", 310, 128, 16, DIM, "center", font="tech", tracking=0.2)
+            self._jt(img, f"{rv['score']}", "", 400, 122, 28, RIVAL_RED, font="display", bold=True)
+            self._jt(img, f"あなた {r.collected} 個　　ライバル（{config.RIVAL_LEVEL_NAMES[rv['level']][1]}）"
+                     f"{rv['collected']} 個", "collected", 310, 170, 15, INK, "center")
+            self._jt(img, f"止めた回数 {rv['freezes']}　　取られた {rv['steals']}　　落とされた {rv['knocked']}"
+                     f"　　失敗 {r.failures}", "counts", 310, 198, 15, INK, "center")
         rank = f["rank"]
-        mode_ja = MODE_TEXT[f.get("mode", "challenge")][1].split("　")[0]
+        key = f.get("key", "normal")
+        mode_ja = "ノーマル" if key == "normal" else \
+            f"チャレンジ・{config.RIVAL_LEVEL_NAMES[key.split('_', 1)[1]][1]}"
         self._label(img, "HIGH SCORES", f"ハイスコア（{mode_ja}）"
                     + (f"　今回 {rank + 1} 位" if rank is not None else ""), 50, 254, GOLD if rank is not None else ACCENT)
         for i, sc in enumerate(f["scores"]):
@@ -484,8 +542,9 @@ class GameView:
             self._jt(img, REGION_JA[name], name, x, y, 14, rgb255(REGION_COLORS[name]))
             self._jt(img, f"{f['usage'].get(name, 0.0) * 100:3.0f}%", "", x + 290, y, 14, DIM, "right", font="tech")
         self._label(img, "SPIKES", "最後に物をつかんだ直前の 4 秒（上の白い行 = 把持ニューロン）", 660, 404, DIM, 13)
-        legend = "相関係数の推移　赤 = 電極劣化　ピンク = 再同期" if f.get("mode", "challenge") == "challenge" \
-            else "相関係数の推移　ピンク = 再同期"
+        kinds = {w for _, w in f["record"].marks}
+        legend = "相関係数の推移" + ("　赤 = 電極劣化" if "degrade" in kinds else "") \
+            + ("　水色 = ライバルを止めた" if f.get("rival") else "") + "　ピンク = 再同期"
         self._label(img, "DECODING ACCURACY", legend, 660, 504, DIM, 13)
         self._jt(img, "0 S", "0", 660, 646, 13, DIM, font="tech", tracking=0.1)
         self._jt(img, f"{config.GAME_TIME:.0f} S", "", 1220, 646, 13, DIM, "right", font="tech", tracking=0.1)
@@ -543,18 +602,36 @@ class GameView:
         score = m.result.score if m else 0
         self._jt(img, "SCORE", "", 24, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
         self._jt(img, f"{score:05d}", f"{score}", 24, 22, 30, GOLD, font="display", bold=True, tracking=0.06)
-        self._jt(img, "ITEMS", "", 250, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
-        self._jt(img, f"{m.result.collected if m else 0:02d}", "", 250, 22, 30, INK, font="display", bold=True)
+        rv = g.rival
+        if rv is not None:                     # チャレンジ：集めた数の代わりにライバルのスコア
+            self._jt(img, "RIVAL", "", 250, 7, 13, RIVAL_RED, font="tech", bold=True, tracking=0.25)
+            self._jt(img, f"{rv.score:05d}", f"{rv.score}", 250, 22, 30, RIVAL_RED, font="display", bold=True,
+                     tracking=0.06)
+        else:
+            self._jt(img, "ITEMS", "", 250, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
+            self._jt(img, f"{m.result.collected if m else 0:02d}", "", 250, 22, 30, INK, font="display", bold=True)
         tl = m.time_left if m else config.GAME_TIME
         self._jt(img, "TIME", "", 470, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
         self._jt(img, f"{tl:05.1f}", f"{tl:3.0f}", 770, 10, 24, BAD if tl < 20 else INK, "right", font="display")
         self._jt(img, "COMBO", "", 830, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
         self._jt(img, f"x{m.combo_mult:.1f}" if m else "x1.0", "", 925, 12, 24, GOLD if (m and m.combo > 0) else INK,
                  font="display")
-        if not self._degrade_mode():          # ノーマル（劣化なし）：同期の状態は出さず、モードだけ
+        if rv is not None:                    # チャレンジ：ライバルの状態（動いている / 止まっている / 止められるまで）
+            st, left = rv.status
+            if st == "frozen":
+                code, sub, col = "FROZEN", f"止まっている　残り {left:3.1f} 秒", ICE
+            elif st == "cooldown":
+                code, sub, col = "ACTIVE", f"止められるまで {left:3.0f} 秒", RIVAL_RED
+            else:
+                code, sub, col = "ACTIVE", "見つめて止められる", RIVAL_RED
+            self._jt(img, f"RIVAL  {config.RIVAL_LEVEL_NAMES[rv.level][0]}", "", 1050, 7, 13, DIM, font="tech",
+                     bold=True, tracking=0.25)
+            self._jt(img, code, code, 1050, 22, 18, col, font="tech", bold=True, tracking=0.12)
+            self._jt(img, sub, "", 1050, 42, 13, ICE if st == "ready" else DIM)
+        elif not self._degrade_mode():        # ノーマル（劣化なし）：同期の状態は出さず、モードだけ
             self._jt(img, "MODE", "", 1050, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
             self._jt(img, "NORMAL", "NORMAL", 1050, 22, 18, DIM, font="tech", bold=True, tracking=0.12)
-        else:                                 # チャレンジ（劣化あり）：同期の状態
+        else:                                 # 電極劣化あり（config.DEGRADE_ENABLED）：同期の状態
             state, text, col = self._sync_state()
             code = {"good": "LINK  STABLE", "degraded": "LINK  DEGRADED", "resync": "RESYNC",
                     "none": "LINK  OFFLINE"}[state]
@@ -564,6 +641,13 @@ class GameView:
             sub = {"good": "同期 良好", "degraded": "L で再同期", "resync": f"残り {g.hand_calib.remaining:3.0f} 秒",
                    "none": "同期前"}[state]
             self._jt(img, sub, "", 1050, 42, 13, col if state == "degraded" else DIM)
+
+        # ---- 止まっているライバルの上に「FROZEN」----
+        if rv is not None and rv.frozen and g.state == "play":
+            p = g.scene.project(rv.robot.pos, 0.13, SCENE_RECT)
+            if p is not None:
+                self._jt(img, f"FROZEN {rv.frozen_t:3.1f}", "FROZEN", p[0], p[1] - 24, 16, ICE, "center", font="tech",
+                         bold=True, tracking=0.2)
 
         # ---- 得点のポップアップ ----
         now = time.monotonic()

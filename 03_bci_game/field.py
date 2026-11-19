@@ -56,12 +56,13 @@ class Field:
         self.rng = rng
         self.items = []
         self.refill_timers = []         # 補充までの残り時間
+        self.extra_avoid = []           # ほかに避ける場所（チャレンジ：ライバルのカゴ）
 
-    def reset(self, robot_pos):
+    def reset(self, robot_pos, more_avoid=()):
         self.items = []
         self.refill_timers = []
         for _ in range(config.FIELD_START_ITEMS):
-            self.spawn(self._random_type(), avoid=[robot_pos], drop=False)
+            self.spawn(self._random_type(), avoid=[robot_pos, *more_avoid], drop=False)
 
     def _random_type(self):
         names = [k for k, v in config.ITEM_TYPES.items() if v["weight"] > 0]
@@ -71,7 +72,8 @@ class Field:
     def _free_position(self, avoid=()):
         """他の物・ロボット・カゴから離れた、机の上の位置"""
         m = 0.06
-        others = [it.pos for it in self.items] + [np.asarray(a) for a in avoid] + [np.asarray(config.GOAL_POS)]
+        others = ([it.pos for it in self.items] + [np.asarray(a) for a in avoid] + [np.asarray(config.GOAL_POS)]
+                  + [np.asarray(a) for a in self.extra_avoid])
         for _ in range(300):
             p = np.array([self.rng.uniform(m, config.WORLD_W - m), self.rng.uniform(m + 0.04, config.WORLD_H - m)])
             if all(np.linalg.norm(p - q) > config.ITEM_MIN_GAP for q in others):

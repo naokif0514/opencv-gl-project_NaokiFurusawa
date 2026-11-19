@@ -94,6 +94,16 @@ class GameResult:
     max_combo: float = 1.0
     by_type: dict = field(default_factory=dict)
     events: list = field(default_factory=list)       # (プレイ時間, 文字列)
+    knocked: int = 0                                 # チャレンジ：ライバルにぶつかられて落とした回数
+
+
+def item_points(item, goal, combo_mult):
+    """物をカゴに入れたときの点数：基本点 × 距離の倍率（つかんだ位置がそのカゴから遠いほど高い）× コンボの倍率"""
+    d = float(np.linalg.norm(item.pickup_pos - np.asarray(goal)))
+    dmax = float(np.hypot(config.WORLD_W, config.WORLD_H))
+    lo, hi = config.DISTANCE_BONUS
+    dist_mult = lo + (hi - lo) * min(1.0, d / (0.8 * dmax))
+    return int(round(item.spec["points"] * dist_mult * combo_mult)), dist_mult
 
 
 class Mission:
@@ -165,11 +175,20 @@ class Mission:
 
     def points_for(self, item):
         """この物をカゴに入れたときの点数：基本点 × 距離の倍率 × コンボの倍率"""
-        d = float(np.linalg.norm(item.pickup_pos - np.asarray(config.GOAL_POS)))
-        dmax = float(np.hypot(config.WORLD_W, config.WORLD_H))
-        lo, hi = config.DISTANCE_BONUS
-        dist_mult = lo + (hi - lo) * min(1.0, d / (0.8 * dmax))
-        return int(round(item.spec["points"] * dist_mult * self.combo_mult)), dist_mult
+        return item_points(item, config.GOAL_POS, self.combo_mult)
+
+    def knock_off(self, tip):
+        """チャレンジ：運んでいる途中でライバルにぶつかられて、物を落とす（床に残る。コンボは下げない）"""
+        if self.held is None:
+            return None
+        it = self.held
+        it.held = False
+        it.pos = tip.copy()
+        it.height = 0.08
+        self.held = None
+        self.result.knocked += 1
+        self.log(f"knocked:{it.type}")
+        return it
 
     def on_open(self, tip):
         """グリッパーを開いたとき：カゴの中なら得点、外なら床に落ちて残る（失敗）"""

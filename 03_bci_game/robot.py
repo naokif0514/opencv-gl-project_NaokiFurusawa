@@ -33,13 +33,15 @@ def _wrap(a):
 
 
 class Robot:
-    def __init__(self):
-        self.arm = TwoLinkArm(base=config.ROBOT_START, l1=config.ARM_L1, l2=config.ARM_L2, elbow=config.ARM_ELBOW)
+    def __init__(self, start=config.ROBOT_START, heading=math.pi / 2, max_speed=config.ROBOT_MAX_SPEED):
+        """start・heading：最初の位置と向き（ライバルは机の奥から手前向き）、max_speed：台座の最高速度"""
+        self.start, self.start_heading, self.max_speed = tuple(start), heading, max_speed
+        self.arm = TwoLinkArm(base=start, l1=config.ARM_L1, l2=config.ARM_L2, elbow=config.ARM_ELBOW)
         self.reset()
 
     def reset(self):
-        self.pos = np.array(config.ROBOT_START, dtype=np.float64)
-        self.heading = math.pi / 2                 # 上（画面の奥）を向く
+        self.pos = np.array(self.start, dtype=np.float64)
+        self.heading = self.start_heading          # プレイヤーは上（画面の奥）を向く
         self.speed = 0.0
         self.goal = None                           # 目的地（ワールド座標）
         self.face_point = None                     # 到着後に向く点
@@ -88,7 +90,7 @@ class Robot:
                 self.speed = 0.0
             else:
                 # 到着でちょうど止まれる速さ sqrt(2 a d) と最高速度のうち小さい方へ、加速度の上限つきで近づける
-                want = min(config.ROBOT_MAX_SPEED, math.sqrt(2 * config.ROBOT_ACCEL * dist))
+                want = min(self.max_speed, math.sqrt(2 * config.ROBOT_ACCEL * dist))
                 dv = np.clip(want - self.speed, -config.ROBOT_ACCEL * dt * 2, config.ROBOT_ACCEL * dt)
                 self.speed = max(0.0, self.speed + dv)
                 step = min(dist, self.speed * dt)
