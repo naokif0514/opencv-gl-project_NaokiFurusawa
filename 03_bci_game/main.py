@@ -176,6 +176,8 @@ class Game:
         self.state, self.state_t = s, 0.0
         self.events.append(f"state:{s}")
         cam = self.brain.camera
+        if self.vision is not None:
+            self.vision.setup_enabled = s == "camera_setup"    # 大きな映像と明るさの測定は、この画面だけ
         if s == "title":
             self.brain.set_surface("pial")
             cam.sway, cam.goal_dist = None, 3.3
@@ -220,6 +222,42 @@ class Game:
         self.rival_level = level
 
     def start_game(self):
+        """タイトルでスタート：カメラモードなら、まずカメラ調整の画面（テストモードでは飛ばす）"""
+        if self.vision is not None and not self.test_mode:
+            self.set_state("camera_setup")
+        else:
+            self.begin_game()
+
+    def setup_checks(self):
+        """カメラ調整の画面のチェック：[(項目, 合格か, 説明), ...]"""
+        vs = self.vision.get_state()
+        lo, hi = config.SETUP_FACE_SIZE_RANGE
+        fs = vs.face_size
+        if fs is None:
+            size = (False, "顔が見つからないので測れない")
+        elif fs < lo:
+            size = (False, "遠すぎる（もう少しカメラに近づく）")
+        elif fs > hi:
+            size = (False, "近すぎる（少しカメラから離れる）")
+        else:
+            size = (True, "ちょうどいい")
+        if vs.luma is None:
+            light = (False, "測定中")
+        elif vs.luma < config.SETUP_MIN_LUMA:
+            light = (False, "暗すぎる（部屋を明るくする）")
+        elif vs.face_luma is not None and vs.face_luma < config.SETUP_MIN_FACE_LUMA:
+            light = (False, "顔が暗い（顔に光を当てる）")
+        elif vs.face_luma is not None and vs.luma - vs.face_luma > config.SETUP_BACKLIGHT_DIFF:
+            light = (False, "逆光（背中側の窓・照明を避ける）")
+        else:
+            light = (True, "十分")
+        return [("顔", vs.face_detected, "見つかった" if vs.face_detected else "見つからない（カメラの正面へ）"),
+                ("手", vs.hand.detected, "見つかった" if vs.hand.detected else "見つからない（右手をカメラにかざす）"),
+                ("顔の大きさ", *size),
+                ("明るさ", *light)]
+
+    def begin_game(self):
+        """ゲームを始める（脳と接続中 → 視線同期 → 同期フェーズ → プレイ）"""
         self.build_cortex()
         self.robot.reset()
         if self.game_mode == "challenge":
@@ -250,6 +288,12 @@ class Game:
         if action != glfw.PRESS:
             return
         go = key in (glfw.KEY_SPACE, glfw.KEY_ENTER)
+        if self.state == "camera_setup":
+            if key == glfw.KEY_ESCAPE:           # カメラ調整の画面：ESC でタイトルへ、SPACE / ENTER でゲームへ
+                self.set_state("title")
+            elif go:
+                self.begin_game()
+            return
         if key == glfw.KEY_ESCAPE:
             glfw.set_window_should_close(window, True)
         elif key == glfw.KEY_F11:
@@ -320,7 +364,9 @@ class Game:
     def on_mouse_button(self, window, button, action, mods):
         if button == glfw.MOUSE_BUTTON_LEFT:
             self.mouse_down = action == glfw.PRESS
-            if action == glfw.PRESS and self.state == "title":
+            if action == glfw.PRESS and self.state == "camera_setup" and self.view.setup_button_hit(self.mouse_layout()):
+                self.begin_game()
+            elif action == glfw.PRESS and self.state == "title":
                 p = self.mouse_layout()
                 mode = self.view.mode_button_hit(p)
                 level = self.view.level_button_hit(p)
