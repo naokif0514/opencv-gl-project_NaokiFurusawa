@@ -47,3 +47,17 @@ fps（カメラモード、上限 60）：light（ソフトウェア描画）約
 | `items_5_compare_closeup.png` | 拡大の比較（左 = 変更前、右 = 変更後） |
 
 fps（テストモード、上限なし、変更前と後を交互に 2 回ずつ測った平均）：standard 約 186 → 約 143、high 約 147 → 約 130（上限 60 には十分余裕がある）。
+
+## 影（段階 D の一部。背景は変えていない）
+
+箱を茶色の段ボールにしたあとの画面で比べた（変更前も茶色の箱）。
+
+| ファイル | 内容 |
+|---|---|
+| `shadows_0_before_standard.png` | 変更前（画質 standard）：物・ロボットの下に半透明の黒い楕円 |
+| `shadows_1_after_standard.png` | 変更後（画質 standard）：柔らかい影の画像。ロボットは車体・肩・腕・肘・手首で別々の影 |
+| `shadows_2_after_high.png` | 変更後（画質 high）：主な光からのシャドウマップ（縁は PCF でぼかす）+ 薄い接地の影 |
+| `shadows_3_before_arm_closeup.png` | 変更前（拡大、腕を伸ばした状態）：影は車体の下の楕円だけで、腕の影がない |
+| `shadows_4_after_arm_closeup_standard.png` | 変更後（拡大、standard）：腕の影が腕についていく |
+| `shadows_5_after_arm_closeup_high.png` | 変更後（拡大、high）：腕・関節・グリッパーの形の影 |
+| `shadows_6_compare_arm_holding.png` | 腕を伸ばして玉を持った状態の比較（上 = 変更前、下 = 変更後。左 = standard、右 = high）。持ち上げた玉の影は小さく薄い |

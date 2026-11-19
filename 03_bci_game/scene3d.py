@@ -22,6 +22,7 @@ import config
 from gfx2d import rotate_z, scale, translate
 from gl_utils import ShaderProgram, look_at, perspective
 from robot_view import Meshes, RobotView, load_obj, rotate_y
+from shadows import ShadowDecals, ShadowMap, light_shift
 
 LIGHT_DIR = np.array([-0.45, 1.0, 0.55])
 BASKET_COLOR = (0.75, 0.45, 0.18)
@@ -79,6 +80,11 @@ class Scene3D:
         self.robot_view = RobotView(self)
         # 画質 standard / high では作り込んだ物・カゴのモデル、light では以前の簡単な形（重さを変えないため）
         self.item_models = load_obj(ITEM_MODEL_PATH) if self.full else None
+        # 影：light = 楕円、standard = 柔らかい影の画像、high = シャドウマップ + 薄い接地の影（shadows.py）
+        self.shadow_mode = config.SHADOW_MODE
+        base = os.path.dirname(os.path.abspath(__file__))
+        self.decals = ShadowDecals(base) if self.shadow_mode in ("decal", "map") else None
+        self.shadow_map = ShadowMap(config.SHADOW_MAP_SIZE) if self.shadow_mode == "map" else None
         self.follow = np.zeros(3)
         self.shake_t = 0.0
         self.shake_amp = 0.0
@@ -311,37 +317,8 @@ class Scene3D:
         s.set_float("uExposure", config.EXPOSURE)
 
     # --------------------------------------------------------
-    def render(self, viewport, robot, items, held, t, dt, selected=None):
-        """viewport：glViewport の値（左下原点、画素）"""
-        gl.glViewport(*viewport)
-        self.update_camera(robot, dt, viewport[2] / max(viewport[3], 1))
-        gl.glEnable(gl.GL_DEPTH_TEST)
-        s = self.shader
-        s.use()
-        s.set_mat4("uView", self.view)
-        s.set_mat4("uProj", self.proj)
-        s.set_vec3("uLightDir", LIGHT_DIR)
-        s.set_vec3("uCamPos", self.eye)
-        if self.full:
-            self._set_lights(s)
-
-        self._table()
-        self._basket()
-
-        # ---- 影（半透明。深度は書かない）----
-        gl.glEnable(gl.GL_BLEND)
-        gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
-        gl.glDepthMask(gl.GL_FALSE)
-        self._shadow(robot.pos, 0.075)
-        for it in items:
-            if not it.held:
-                self._shadow(it.pos, it.radius * 1.3, 1.0 - min(1.0, it.height / 0.6))
-        if held is not None:
-            self._shadow(held.pos, held.radius * 1.2, 0.6)
-        gl.glDepthMask(gl.GL_TRUE)
-        gl.glDisable(gl.GL_BLEND)
-
-        # ---- 物とロボット ----
+    def _draw_objects(self, robot, items, held, t, selected):
+        """物・ロボット・持っている物を描く（シャドウマップを作るときにも同じものを描く）"""
         for it in items:
             if not it.held:
                 self._item(it, t, selected == it.id)
@@ -353,6 +330,112 @@ class Scene3D:
             held.height = RobotView.ARM_HEIGHT - held.radius * 1.2
             self._item(held, t)
             held.height = saved
+
+    def _shadow_point(self, p, h, contact):
+        """ワールド座標の点 p（高さ h）の影の中心（3D の x, z）。接地の影（contact）はずらさない"""
+        c = self.to3d(p, 0.0)
+        sx, sz = (0.0, 0.0) if contact else light_shift(h)
+        return (c[0] + sx, c[2] + sz)
+
+    def _build_decals(self, robot, items, held, contact):
+        """
+        柔らかい影の四角形を作る。contact = True（画質 high）のときは、シャドウマップの影に重ねる
+        薄い「接地の影」だけ（机に接している物の真下）
+        """
+        d = self.decals
+        d.begin()
+        k = 0.45 if contact else 1.0
+        arm_h = RobotView.ARM_HEIGHT
+        center_h = {"cube": 0.85, "cylinder": 1.3, "sphere": 1.0, "star": 1.3}
+        # ---- 物：持ち上げる（床から離れる）ほど、影は小さく薄くなる ----
+        for it in list(items) + ([held] if held is not None and held not in items else []):
+            r = it.radius
+            lift = arm_h - r * 1.2 if it.held else it.height
+            if contact and lift > 0.01:
+                continue
+            ch = lift + r * center_h[it.spec["shape"]]
+            size = (r * 1.25 + 0.006) * max(0.45, 1.0 - 3.0 * lift)
+            alpha = 0.60 * max(0.18, 1.0 - 5.0 * lift) * k
+            d.blob(self._shadow_point(it.pos, ch * 0.6, contact), size, alpha)
+        # ---- カゴ ----
+        R = config.GOAL_RADIUS * 0.92
+        d.rect(self._shadow_point(np.asarray(config.GOAL_POS), 0.02, contact), (1.0, 0.0), R + 0.008, R + 0.008,
+               0.016, 0.42 * k)
+        # ---- ロボットの車体（向きに合わせて回した角の丸い長方形）----
+        L, Wd = config.ROBOT_BODY
+        fw = (math.cos(robot.heading), -math.sin(robot.heading))       # ワールドの向き → 3D の (x, z)
+        d.rect(self._shadow_point(robot.pos, 0.03, contact), fw, L / 2 + 0.008, Wd / 2 + 0.007, 0.014, 0.55 * k)
+        if contact:
+            return
+        # ---- 肩・腕・肘・手首：関節の位置から、腕と同じ高さの影を落とす（腕を伸ばすと影もついていく）----
+        pose = robot.pose
+        d.blob(self._shadow_point(pose.base, 0.065, False), 0.024, 0.32)
+        for a, b, w in ((pose.base, pose.elbow, 0.0105), (pose.elbow, pose.hand, 0.0085)):
+            pa = np.array(self._shadow_point(a, arm_h, False))
+            pb = np.array(self._shadow_point(b, arm_h, False))
+            v = pb - pa
+            n = float(np.linalg.norm(v))
+            if n < 1e-6:
+                continue
+            soft = w + 0.005
+            d.rect((pa + pb) / 2, v / n, n / 2 + soft, soft, soft, 0.36)
+        fa = pose.theta1 + pose.theta2
+        tip = pose.hand + 0.016 * np.array([math.cos(fa), math.sin(fa)])
+        d.blob(self._shadow_point(pose.elbow, arm_h, False), 0.017, 0.22)
+        d.blob(self._shadow_point(tip, arm_h, False), 0.019, 0.30)
+
+    def render(self, viewport, robot, items, held, t, dt, selected=None):
+        """viewport：glViewport の値（左下原点、画素）"""
+        gl.glViewport(*viewport)
+        self.update_camera(robot, dt, viewport[2] / max(viewport[3], 1))
+
+        # ---- シャドウマップ（画質 high）：主な光から見た深度を描く。机は影を受けるだけなので描かない ----
+        if self.shadow_mode == "map":
+            main = self.shader
+            self.shader = self.shadow_map.begin()
+            self._basket()
+            self._draw_objects(robot, items, held, t, None)
+            self.shader = main
+            self.shadow_map.end()
+            gl.glViewport(*viewport)
+
+        gl.glEnable(gl.GL_DEPTH_TEST)
+        s = self.shader
+        s.use()
+        s.set_mat4("uView", self.view)
+        s.set_mat4("uProj", self.proj)
+        s.set_vec3("uLightDir", LIGHT_DIR)
+        s.set_vec3("uCamPos", self.eye)
+        if self.full:
+            self._set_lights(s)
+            if self.shadow_map is not None:
+                self.shadow_map.bind(s)
+            else:
+                s.set_int("uShadowOn", 0)
+
+        self._table()
+        self._basket()
+
+        # ---- 影（半透明。深度は書かない）----
+        gl.glEnable(gl.GL_BLEND)
+        gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+        gl.glDepthMask(gl.GL_FALSE)
+        if self.decals is None:                    # light：半透明の楕円（以前のまま）
+            self._shadow(robot.pos, 0.075)
+            for it in items:
+                if not it.held:
+                    self._shadow(it.pos, it.radius * 1.3, 1.0 - min(1.0, it.height / 0.6))
+            if held is not None:
+                self._shadow(held.pos, held.radius * 1.2, 0.6)
+        else:                                      # standard：柔らかい影の画像、high：薄い接地の影
+            self._build_decals(robot, items, held, contact=self.shadow_map is not None)
+            self.decals.draw(self.view, self.proj)
+            s.use()
+        gl.glDepthMask(gl.GL_TRUE)
+        gl.glDisable(gl.GL_BLEND)
+
+        # ---- 物とロボット ----
+        self._draw_objects(robot, items, held, t, selected)
 
         # ---- ボーナスの光（加算合成。深度は書かない）----
         if self.item_models is not None:

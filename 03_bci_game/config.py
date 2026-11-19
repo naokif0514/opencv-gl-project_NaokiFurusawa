@@ -264,15 +264,18 @@ RENDER_SCALE = 1.25           # 3D・図形を描く解像度 = 1280×720 × こ
 #   "auto"            : GPU が使えれば standard、ソフトウェア描画なら light（main.py の --quality で上書き）
 QUALITY = "auto"
 QUALITY_PRESETS = {
-    #            描く解像度の倍率, MSAA, シェーダー（basic = 以前のもの / full = 新しいもの）, 円柱の分割数, 球の細かさ
-    "light":    {"render_scale": 1.25, "msaa": 0, "shading": "basic", "segments": 12, "sphere": 1},
-    "standard": {"render_scale": 1.5,  "msaa": 4, "shading": "full",  "segments": 24, "sphere": 2},
-    "high":     {"render_scale": 2.0,  "msaa": 8, "shading": "full",  "segments": 40, "sphere": 3},
+    #            描く解像度の倍率, MSAA, シェーダー（basic = 以前のもの / full = 新しいもの）, 円柱の分割数, 球の細かさ,
+    #            影（ellipse = 半透明の楕円 / decal = 柔らかい影の画像 / map = シャドウマップ。shadows.py）
+    "light":    {"render_scale": 1.25, "msaa": 0, "shading": "basic", "segments": 12, "sphere": 1, "shadow": "ellipse"},
+    "standard": {"render_scale": 1.5,  "msaa": 4, "shading": "full",  "segments": 24, "sphere": 2, "shadow": "decal"},
+    "high":     {"render_scale": 2.0,  "msaa": 8, "shading": "full",  "segments": 40, "sphere": 3, "shadow": "map"},
 }
 QUALITY_NAME_JA = {"light": "軽量", "standard": "標準", "high": "高画質"}
 QUALITY_ACTIVE = "light"      # 実際に選ばれた段階（apply_quality で決まる）
 SCENE_SHADING = "basic"       # 3D の場面のシェーダー（apply_quality で決まる）
 SPHERE_SUBDIV = 1             # 球（アイコスフィア）の分割回数（apply_quality で決まる）
+SHADOW_MODE = "ellipse"       # 影の方式（apply_quality で決まる。shadows.py）
+SHADOW_MAP_SIZE = 2048        # シャドウマップの大きさ [画素]（画質 high。机の幅 1 に約 1,700 画素）
 
 # ---- 新しいシェーダー（SCENE_SHADING = "full"）の光と色（scene3d.py）----
 #   色は sRGB で書き、シェーダーの中で線形にして計算する
@@ -294,7 +297,7 @@ LOG_DIR = "logs"
 
 def apply_quality(name):
     """画質の段階を決めて、描画の設定を書きかえる（ウィンドウ・シェーダーを作る前に呼ぶ）"""
-    global RENDER_SCALE, MSAA_SAMPLES, SCENE_SHADING, ARM_MESH_SEGMENTS, SPHERE_SUBDIV, QUALITY_ACTIVE
+    global RENDER_SCALE, MSAA_SAMPLES, SCENE_SHADING, ARM_MESH_SEGMENTS, SPHERE_SUBDIV, QUALITY_ACTIVE, SHADOW_MODE
     p = QUALITY_PRESETS[name]
     QUALITY_ACTIVE = name
     RENDER_SCALE = p["render_scale"]
@@ -302,6 +305,7 @@ def apply_quality(name):
     SCENE_SHADING = p["shading"]
     ARM_MESH_SEGMENTS = p["segments"]
     SPHERE_SUBDIV = p["sphere"]
+    SHADOW_MODE = p["shadow"] if SCENE_SHADING == "full" else "ellipse"
 
 # ============================================================
 # 軽量モード（python main.py --light、または LIGHT_MODE = True）
