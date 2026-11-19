@@ -22,6 +22,8 @@ COLUMNS = ["time_sec", "state", "mode", "gaze_x", "gaze_y", "dwell_target", "dwe
            "hand_size",
            # 視線が吸い付いている対象の画面の位置（gaze_x, gaze_y と比べて、ずれの向きを調べる）
            "focus_x", "focus_y",
+           # 視線の特徴量（vision.gaze_features）：黒目の左右・上下（目の中の位置 / 目の幅）、顔の向き（鼻先のずれ / 両目の間の距離）
+           "iris_x", "iris_y", "head_yaw", "head_pitch",
            "event"]
 
 

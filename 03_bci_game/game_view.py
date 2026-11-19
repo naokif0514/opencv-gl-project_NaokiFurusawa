@@ -734,7 +734,7 @@ class GameView:
             elif check:
                 guide = "金色の点を見つめてください。"
             else:
-                guide = "光る点を、顔を動かさずに目で追ってください。あなたの目の動きと画面の位置を対応づけます。"
+                guide = "光る点を、ゲーム中と同じように自然に見てください。あなたの目の動きと画面の位置を対応づけます。"
             self._jt(img, guide, "look at the dot", cx, 27, 12, INK if face else BAD, "center")
             if cal.tries > 0:
                 last = f"前回のずれ 約 {cal.check_error:.0f} 画素（{config.GAZE_CHECK_MAX_ERR:.0f} 以下で合格）→ {cal.tries + 1} 回目"

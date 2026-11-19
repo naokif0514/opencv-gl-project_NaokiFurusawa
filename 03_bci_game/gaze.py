@@ -249,7 +249,9 @@ def _fit_model(F, P):
     quad = len(F) >= 9
     mu, sd = F.mean(axis=0), np.maximum(F.std(axis=0), 1e-6)
     Z = (F - mu) / sd
-    model = {"mu": mu, "sd": sd, "quad": quad}
+    # [B] 同期で見た特徴量の範囲：2 次の項はこの範囲（+ GAZE_QUAD_CLIP）で止めて計算し、外側で伸ばしすぎない
+    model = {"mu": mu, "sd": sd, "quad": quad,
+             "zlo": Z.min(axis=0) - config.GAZE_QUAD_CLIP, "zhi": Z.max(axis=0) + config.GAZE_QUAD_CLIP}
     for axis, X in zip(("ax", "ay"), _design(Z, quad)):
         k = X.shape[1]
         reg = np.diag([0.0] + [config.GAZE_RIDGE] * 2 + [config.GAZE_RIDGE_QUAD] * (k - 3))
@@ -260,6 +262,10 @@ def _fit_model(F, P):
 def _predict_model(model, feat):
     z = ((np.asarray(feat, dtype=np.float64) - model["mu"]) / model["sd"])[None, :]
     X, Y = _design(z, model["quad"])
+    if model["quad"] and "zlo" in model:                # [B] 2 次の項だけ、同期で見た範囲で止めた値で計算する
+        zc = np.clip(z, model["zlo"], model["zhi"])
+        Xc, Yc = _design(zc, True)
+        X[:, 3:], Y[:, 3:] = Xc[:, 3:], Yc[:, 3:]
     return np.array([float(X[0] @ model["ax"]), float(Y[0] @ model["ay"])])
 
 
@@ -344,8 +350,8 @@ class GazeTracker:
             self.feats.popleft()
         mean_feat = np.mean([f for _, f in self.feats], axis=0)          # (a) 特徴量の平均
         self.raw = self.calib.predict(feat)
-        p = self.calib.predict(mean_feat) + self.offset
-        lo, hi = np.array(config.GAZE_CLAMP[:2]), np.array(config.GAZE_CLAMP[2:])
+        p = self._shrink(self.calib.predict(mean_feat)) + self.offset
+        lo, hi = self._bounds()
         p = np.clip(self.filter(p, dt), lo, hi)                          # (b) One Euro フィルタ
         self.recent.append((self.time, p.copy()))
         while self.recent and self.time - self.recent[0][0] > config.DWELL_SEC:
@@ -357,6 +363,19 @@ class GazeTracker:
         else:
             self.point = self.point + (fix - self.point) * (1.0 - math.exp(-dt / config.GAZE_GLIDE_SEC))
         return self.point
+
+    def _shrink(self, p):
+        """[C] 同期の点の中心に向かって、左右 GAZE_SHRINK_X・上下 GAZE_SHRINK_Y 倍に縮める（行き過ぎを減らす）"""
+        c = np.mean(self.calib.points, axis=0)
+        return c + (np.asarray(p) - c) * np.array([config.GAZE_SHRINK_X, config.GAZE_SHRINK_Y])
+
+    def _bounds(self):
+        """[B] 注視点を収める範囲：同期の点の範囲 + GAZE_EXTRAP_MARGIN（画面の中）"""
+        P = np.array(self.calib.points)
+        m = config.GAZE_EXTRAP_MARGIN
+        lo = np.maximum(P.min(axis=0) - m, config.GAZE_CLAMP[:2])
+        hi = np.minimum(P.max(axis=0) + m, config.GAZE_CLAMP[2:])
+        return lo, hi
 
     def correct(self, target):
         """

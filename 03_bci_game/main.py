@@ -568,7 +568,9 @@ class Game:
             else:
                 p = self.scene.project(GOAL_POS, 0.03, SCENE_RECT)
                 if p is not None:
-                    targets.append(("goal", p, self.scene.screen_radius(GOAL_POS, 0.0, config.GOAL_RADIUS, SCENE_RECT)))
+                    # [E] 運んでいる間はカゴしか選べないので、カゴへの吸い付く範囲を広げる（ほかの物と取り違えない）
+                    targets.append(("goal", p, self.scene.screen_radius(GOAL_POS, 0.0, config.GOAL_RADIUS, SCENE_RECT),
+                                    {"snap": config.GOAL_SNAP_CARRY_PX}))
             # チャレンジ：ライバルを見つめて止める（物より吸い付く範囲を狭く、見つめる時間を長く）
             if rv is not None and rv.can_freeze:
                 p = self.scene.project(rv.robot.pos, 0.06, SCENE_RECT)
@@ -803,10 +805,17 @@ class Game:
             (self.rival.held.type if self.rival.held is not None else ""),
             freezes=None if (m is None or self.rival is None) else self.rival.freezes,
             hand_size=None if (self.vision is None or self.test_mode) else self.vision.get_state().hand_size,
+            **self._gaze_feat_log(),
             focus_x=None if self.dwell.focus_pos is None else float(self.dwell.focus_pos[0]),
             focus_y=None if self.dwell.focus_pos is None else float(self.dwell.focus_pos[1]),
             event=";".join(self.events))
         self.events = []
+
+    def _gaze_feat_log(self):
+        """ログ用：視線の特徴量（黒目の左右・上下、顔の向き yaw・pitch）。カメラモードだけ（まばたき中は空）"""
+        f = None if (self.vision is None or self.test_mode) else self.vision.get_state().gaze_feat
+        keys = ("iris_x", "iris_y", "head_yaw", "head_pitch")
+        return {k: (None if f is None else float(v)) for k, v in zip(keys, f if f is not None else (None,) * 4)}
 
     def update_debug_window(self):
         if not self.debug_on or self.vision is None:
