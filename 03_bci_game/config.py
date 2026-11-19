@@ -138,7 +138,7 @@ GAME_NOISE_TYPE = "drift"     # ノイズの種類（neuron_model.py）
 
 # 物の種類：形・色・大きさ（半径、ワールド座標）・基本点・出やすさ。小さい物ほど高得点
 ITEM_TYPES = {
-    "box":   {"shape": "cube",     "rgb": (0.22, 0.50, 1.00), "radius": 0.036, "points": 100, "weight": 0.5,
+    "box":   {"shape": "cube",     "rgb": (0.80, 0.60, 0.38), "radius": 0.036, "points": 100, "weight": 0.5,
               "name": "箱", "finish": "cardboard"},
     "can":   {"shape": "cylinder", "rgb": (0.25, 0.85, 0.42), "radius": 0.028, "points": 150, "weight": 0.3,
               "name": "缶", "finish": "anodized"},

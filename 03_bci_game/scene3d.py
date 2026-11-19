@@ -47,7 +47,7 @@ ITEM_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "asse
 #   役割 → (色（None = 物の種類の色）, 質感（None = 物の種類の finish）, 発光)
 ITEM_PARTS = {
     "main":   (None, None, 0.0),
-    "tape":   ((0.86, 0.72, 0.48), "glossy", 0.0),     # 箱：茶色の梱包テープ
+    "tape":   ((0.50, 0.32, 0.16), "glossy", 0.0),     # 箱：こげ茶の梱包テープ（明るい段ボールの上で見えるように）
     "label":  ((0.93, 0.93, 0.90), "painted", 0.0),    # 箱：白いラベル
     "print":  ((0.10, 0.12, 0.16), "matte", 0.0),      # 箱：印刷の印、缶：飲み口の線
     "band":   ((0.95, 0.96, 0.97), "painted", 0.0),    # 缶：白いラベルの帯
