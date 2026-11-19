@@ -689,6 +689,10 @@ class GameView:
                    "none": "同期前"}[state]
             self._jt(img, sub, "", 1050, 42, 13, col if state == "degraded" else DIM)
 
+        # ---- 視線の合わせ直しの案内（カメラモードのプレイ中、HUD の下に小さく）----
+        if g.state == "play" and not g.test_mode:
+            self._jt(img, "視線がずれてきたら C で合わせ直し", "C: gaze resync", 24, HUD + 6, 12, DIM)
+
         # ---- 止まっているライバルの上に「FROZEN」----
         if rv is not None and rv.frozen and g.state == "play":
             p = g.scene.project(rv.robot.pos, 0.13, SCENE_RECT)
@@ -710,24 +714,25 @@ class GameView:
         cx = W / 2
         if g.state == "gaze_calib":
             cal = g.gaze.calib
+            # 何をしているかの説明（画面の上の中央。四隅の点・確認の点と重ならない高さ）
             check = cal.phase == "check"
             n = len(cal.check_points if check else cal.points)
-            title = "GAZE CHECK" if check else "GAZE SYNC"
-            self._jt(img, f"{title}  {min(cal.index + 1, n)}/{n}", title, cx, HUD + 22, 26, GOLD if check else ACCENT,
-                     "center", font="display", tracking=0.12)
+            title = "ずれを確認します" if check else "視線を合わせます"
+            self._jt(img, f"{title}　{min(cal.index + 1, n)} / {n}", "GAZE SYNC", cx, HUD + 10, 26,
+                     GOLD if check else ACCENT, "center", bold=True)
             face = g.vision.get_state().face_detected if g.vision else False
             if not face:
                 guide = "顔が見つかりません：カメラの正面へ"
             elif check:
-                guide = f"確認：金色の点を見つめてください（ずれ {config.GAZE_CHECK_MAX_ERR:.0f} 画素以下で合格）"
+                guide = "金色の点を見つめてください。"
             else:
-                guide = "光る点を見つめてください（頭は動かさずに）"
-            self._jt(img, guide, "look at the dot", cx, HUD + 62, 16, INK if face else BAD, "center")
+                guide = "光る点を、顔を動かさずに目で追ってください。あなたの目の動きと画面の位置を対応づけます。"
+            self._jt(img, guide, "look at the dot", cx, HUD + 48, 15, INK if face else BAD, "center")
             if cal.tries > 0:
-                last = f"前回のずれ 約 {cal.check_error:.0f} 画素 → {cal.tries + 1} 回目"
+                last = f"前回のずれ 約 {cal.check_error:.0f} 画素（{config.GAZE_CHECK_MAX_ERR:.0f} 以下で合格）→ {cal.tries + 1} 回目"
                 if cal.can_skip:
                     last += f"　　ENTER：今までで一番よい結果（約 {cal.best_error:.0f} 画素）で進む"
-                self._jt(img, last, "retry", cx, HUD + 88, 14, GOLD, "center")
+                self._jt(img, last, "retry", cx, HUD + 74, 13, GOLD, "center")
         if g.hand_calib.active:
             hc = g.hand_calib
             title = "RESYNC" if g.recalibrating else "HAND SYNC"
