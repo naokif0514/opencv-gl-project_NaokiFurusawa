@@ -228,34 +228,6 @@ class Game:
         else:
             self.begin_game()
 
-    def setup_checks(self):
-        """カメラ調整の画面のチェック：[(項目, 合格か, 説明), ...]"""
-        vs = self.vision.get_state()
-        lo, hi = config.SETUP_FACE_SIZE_RANGE
-        fs = vs.face_size
-        if fs is None:
-            size = (False, "顔が見つからないので測れない")
-        elif fs < lo:
-            size = (False, "遠すぎる（もう少しカメラに近づく）")
-        elif fs > hi:
-            size = (False, "近すぎる（少しカメラから離れる）")
-        else:
-            size = (True, "ちょうどいい")
-        if vs.luma is None:
-            light = (False, "測定中")
-        elif vs.luma < config.SETUP_MIN_LUMA:
-            light = (False, "暗すぎる（部屋を明るくする）")
-        elif vs.face_luma is not None and vs.face_luma < config.SETUP_MIN_FACE_LUMA:
-            light = (False, "顔が暗い（顔に光を当てる）")
-        elif vs.face_luma is not None and vs.luma - vs.face_luma > config.SETUP_BACKLIGHT_DIFF:
-            light = (False, "逆光（背中側の窓・照明を避ける）")
-        else:
-            light = (True, "十分")
-        return [("顔", vs.face_detected, "見つかった" if vs.face_detected else "見つからない（カメラの正面へ）"),
-                ("手", vs.hand.detected, "見つかった" if vs.hand.detected else "見つからない（右手をカメラにかざす）"),
-                ("顔の大きさ", *size),
-                ("明るさ", *light)]
-
     def begin_game(self):
         """ゲームを始める（脳と接続中 → 視線同期 → 同期フェーズ → プレイ）"""
         self.build_cortex()

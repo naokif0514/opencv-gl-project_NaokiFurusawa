@@ -51,10 +51,6 @@ class VisionState:
     face_fps: float = 0.0
     hand_fps: float = 0.0
     hand_size: float | None = None          # 手の映る大きさ（手首 → 中指の付け根、画像の幅に対する割合。なめらかにした値）
-    # カメラ調整の画面用（setup_enabled のときだけ計算する）
-    face_size: float | None = None          # 顔の幅（画像の幅に対する割合）
-    luma: float | None = None               # 画像全体の明るさ（0〜255）
-    face_luma: float | None = None          # 顔の明るさ（0〜255）
 
 
 # ============================================================
@@ -214,7 +210,7 @@ class VisionThread(threading.Thread):
         self._running = False
         self.debug_enabled = False
         self.face_enabled = True      # 視線を使わない場面では止めて軽くできる
-        self.setup_enabled = False    # カメラ調整の画面：大きな映像（顔の特徴点・手の骨格つき）と明るさ・顔の大きさを作る
+        self.setup_enabled = False    # カメラ調整の画面：大きな映像を作る
         self._setup = None
         self.velocity = VelocityEstimator()
         self.size_smooth = None       # なめらかにした手の大きさ
@@ -261,33 +257,9 @@ class VisionThread(threading.Thread):
         with self._lock:
             return self._frame_id, self._setup
 
-    def _make_setup_view(self, frame, hand_lm, face_lm, face_box, st, drawing):
-        """
-        カメラ調整の画面の大きな映像（左右反転ずみの frame を縮小し、顔の特徴点と手の骨格を描く）。
-        あわせて、顔の大きさ（顔の幅 / 画像の幅）・画像全体の明るさ・顔の明るさを st に入れる
-        """
-        h, w = frame.shape[:2]
-        gray = cv2.cvtColor(cv2.resize(frame, (160, 120), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
-        st.luma = float(gray.mean())
-        if face_box is not None and st.face_detected:
-            x0, y0, x1, y1 = face_box
-            st.face_size = float(x1 - x0) / 1.3          # face_box は 15% ずつ広げてあるので戻す
-            gx0, gy0 = int(np.clip(x0, 0, 1) * 160), int(np.clip(y0, 0, 1) * 120)
-            gx1, gy1 = int(np.clip(x1, 0, 1) * 160), int(np.clip(y1, 0, 1) * 120)
-            if gx1 > gx0 + 2 and gy1 > gy0 + 2:
-                st.face_luma = float(gray[gy0:gy1, gx0:gx1].mean())
-        else:
-            st.face_size = st.face_luma = None
-        vw, vh = config.SETUP_VIEW_SIZE
-        view = cv2.resize(frame, (vw, vh), interpolation=cv2.INTER_AREA)
-        if face_lm is not None:
-            for k, p in enumerate(face_lm.landmark):
-                if k % 3 == 0:                            # 特徴点を間引いて描く
-                    cv2.circle(view, (int(p.x * vw), int(p.y * vh)), 1, (255, 230, 120), -1, cv2.LINE_AA)
-        if hand_lm is not None:
-            drawing.draw_landmarks(view, hand_lm, mp.solutions.hands.HAND_CONNECTIONS,
-                                   drawing.DrawingSpec(color=(80, 220, 255), thickness=2, circle_radius=3),
-                                   drawing.DrawingSpec(color=(255, 255, 255), thickness=2))
+    def _make_setup_view(self, frame):
+        """カメラ調整の画面の大きな映像（左右反転ずみの frame を縮小しただけ）"""
+        view = cv2.resize(frame, config.SETUP_VIEW_SIZE, interpolation=cv2.INTER_AREA)
         return cv2.cvtColor(view, cv2.COLOR_BGR2RGBA)
 
     def get_pip(self):
@@ -430,10 +402,8 @@ class VisionThread(threading.Thread):
                 cv2.putText(debug, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
                 cv2.putText(debug, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
 
-            # カメラ調整の画面：大きな映像に顔の特徴点と手の骨格を描き、顔の大きさ・明るさを測る
-            setup = None
-            if self.setup_enabled:
-                setup = self._make_setup_view(frame, hand_lm, face_lm, face_box, st, drawing)
+            # カメラ調整の画面：大きな映像（左右反転しただけ）
+            setup = self._make_setup_view(frame) if self.setup_enabled else None
 
             # 画面の隅の小さなカメラ映像（縮小してから手の骨格を描くので軽い）
             pip = cv2.resize(frame, config.PIP_SIZE, interpolation=cv2.INTER_AREA)

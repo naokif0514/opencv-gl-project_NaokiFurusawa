@@ -63,9 +63,8 @@ RULES = {
 }
 RIVAL_RED = (255, 120, 95)
 # カメラ調整の画面
-SETUP_VIEW = (300, 112, 640, 480)          # カメラ映像の位置と大きさ（論理座標）
-SETUP_CARD = (962, 150, 292, 300)          # 右のチェックの表示
-SETUP_BUTTON = (W / 2 - 170, 612, 340, 56)  # 「ゲームへ進む」
+SETUP_VIEW = (320, 96, 640, 480)           # カメラ映像の位置と大きさ（論理座標）
+SETUP_BUTTON = (W / 2 - 170, 600, 340, 54)  # 「ゲームへ進む」
 ICE = (180, 230, 255)
 SCENE_RECT = (0, 0, W, H)
 HUD = config.HUD_HEIGHT
@@ -213,13 +212,12 @@ class GameView:
     # カメラ調整の画面
     # ========================================================
     def _render_setup(self, t):
-        """カメラ映像（顔の特徴点・手の骨格つき）、目安の枠、チェックの表示のカード、「ゲームへ進む」ボタン"""
+        """カメラ映像（左右反転）と「ゲームへ進む」ボタン"""
         b = self.batch
         g = self.g
         b.rect(0, 0, W, H, (0.02, 0.025, 0.045, 1.0))
         vx, vy, vw, vh = SETUP_VIEW
         b.rect(vx - 3, vy - 3, vw + 6, vh + 6, (0.3, 0.45, 0.65, 1))
-        self._card(SETUP_CARD, (0.4, 0.85, 1.0), 0.9)
         x, y, w, h = SETUP_BUTTON
         pulse = 0.5 + 0.5 * math.sin(t * 3)
         b.rect(x, y, w, h, (0.08, 0.25, 0.4, 0.8 + 0.2 * pulse))
@@ -232,43 +230,17 @@ class GameView:
                 self.setup_quad.upload(img)
                 self._setup_id = fid
             self.setup_quad.draw(vx, vy, vw, vh)
-        # 目安の枠（顔が入る位置、手を動かす範囲）を薄く
-        for (gx, gy, gw, gh), col in ((config.SETUP_FACE_GUIDE, (1.0, 0.9, 0.5, 0.55)),
-                                      (config.SETUP_HAND_GUIDE, (0.5, 0.85, 1.0, 0.45))):
-            x0, y0 = vx + gx * vw, vy + gy * vh
-            x1, y1 = x0 + gw * vw, y0 + gh * vh
-            for a, c, d, e in ((x0, y0, x1, y0), (x1, y0, x1, y1), (x1, y1, x0, y1), (x0, y1, x0, y0)):
-                b.line(a, c, d, e, 2, col)
-        b.flush()
 
     def _text_setup(self):
         img = self.overlay_img
-        g = self.g
-        self._jt(img, "CAMERA SETUP", "CAMERA SETUP", W / 2, 22, 30, (225, 240, 255), "center", font="display",
+        self._jt(img, "CAMERA SETUP", "CAMERA SETUP", W / 2, 18, 28, (225, 240, 255), "center", font="display",
                  bold=True, tracking=0.15)
         self._jt(img, "顔と上半身（手を動かす範囲）が入るように、カメラの角度を調整してください", "adjust camera",
-                 W / 2, 72, 17, INK, "center")
-        vx, vy, vw, vh = SETUP_VIEW
-        fx, fy = vx + config.SETUP_FACE_GUIDE[0] * vw, vy + config.SETUP_FACE_GUIDE[1] * vh
-        hx, hy = vx + config.SETUP_HAND_GUIDE[0] * vw, vy + config.SETUP_HAND_GUIDE[1] * vh
-        self._jt(img, "顔", "face", fx + 6, fy + 4, 13, GOLD)
-        self._jt(img, "手を動かす範囲", "hand", hx + 6, hy + 4, 13, ACCENT)
-        # チェックの表示
-        x0, y0 = SETUP_CARD[0] + 16, SETUP_CARD[1] + 14
-        self._label(img, "CHECK", "状態", x0, y0, ACCENT, 14)
-        checks = g.setup_checks() if g.vision is not None else []
-        for i, (name, ok, detail) in enumerate(checks):
-            yy = y0 + 40 + i * 58
-            self._jt(img, "✓" if ok else "×", "ok" if ok else "ng", x0, yy - 2, 24, GOOD if ok else BAD, bold=True)
-            self._jt(img, name, name, x0 + 32, yy, 16, INK, bold=True)
-            self._jt(img, detail, detail, x0 + 32, yy + 24, 12, GOOD if ok else (255, 190, 170))
-        if checks and not all(ok for _, ok, _ in checks):
-            self._jt(img, "このまま進むと操作しにくい場合があります", "warning", SETUP_CARD[0] + SETUP_CARD[2] / 2,
-                     SETUP_CARD[1] + SETUP_CARD[3] + 14, 13, GOLD, "center")
+                 W / 2, 62, 16, INK, "center")
         x, y, w, h = SETUP_BUTTON
-        self._jt(img, "ゲームへ進む", "START", W / 2, y + 8, 20, (255, 255, 255), "center", bold=True)
-        self._jt(img, "SPACE / ENTER / CLICK", "", W / 2, y + 36, 12, ACCENT, "center", font="tech", tracking=0.3)
-        self._jt(img, "ESC  タイトルへ戻る", "ESC: title", W / 2, 684, 13, DIM, "center", font="tech", tracking=0.15)
+        self._jt(img, "ゲームへ進む", "START", W / 2, y + 6, 18, (255, 255, 255), "center", bold=True)
+        self._jt(img, "SPACE / ENTER / CLICK", "", W / 2, y + 32, 11, ACCENT, "center", font="tech", tracking=0.3)
+        self._jt(img, "ESC  タイトルへ戻る", "ESC: title", W / 2, 672, 12, DIM, "center", font="tech", tracking=0.15)
 
     # ========================================================
     # タイトル・接続中
