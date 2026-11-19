@@ -8,7 +8,7 @@
 //  ・机（uMat = 1）：板張りの木目を、位置から計算で作る（画像を使わない）
 //  ・遠くは背景色に溶け込ませる（フォグ）。影（uAlpha < 1 の黒）はそのまま半透明で塗る
 //  ・画質 high（uShadowOn = 1）：主な光のシャドウマップで影を調べ、主な光だけを弱める（補助の光・環境光は残る）。
-//    縁は 16 点の PCF（ポアソン分布の点で調べた平均。1 点ごとにハードウェアの 2×2 の比較も効く）でぼかす
+//    縁は 8 点の PCF（ポアソン分布の点で調べた平均。1 点ごとにハードウェアの 2×2 の比較も効く）でぼかす
 in vec3 vNormal;
 in vec3 vWorld;
 
@@ -62,11 +62,10 @@ vec3 wood(vec3 base, vec3 p) {
     return c;
 }
 
-const vec2 POISSON[16] = vec2[](
-    vec2(-0.942, -0.399), vec2(0.946, -0.769), vec2(-0.094, -0.929), vec2(0.345, 0.294),
-    vec2(-0.916, 0.458), vec2(-0.815, -0.879), vec2(-0.383, 0.277), vec2(0.975, 0.756),
-    vec2(0.443, -0.975), vec2(0.537, -0.474), vec2(-0.265, -0.419), vec2(0.792, 0.191),
-    vec2(-0.242, 0.997), vec2(-0.814, 0.914), vec2(0.200, 0.786), vec2(0.144, -0.141));
+const int PCF_N = 8;
+const vec2 POISSON[8] = vec2[](
+    vec2(-0.613, 0.617), vec2(0.170, -0.040), vec2(-0.299, -0.792), vec2(0.645, 0.493),
+    vec2(-0.651, -0.271), vec2(0.421, -0.784), vec2(-0.017, 0.899), vec2(0.949, -0.163));
 
 // 主な光が届いている割合（1 = 日なた、0 = 影）
 float keyVisibility(vec3 N) {
@@ -78,9 +77,9 @@ float keyVisibility(vec3 N) {
     float a = hash(gl_FragCoord.xy) * 6.2832;               // 点の並びを画素ごとに回して、縞模様を出にくくする
     mat2 R = mat2(cos(a), sin(a), -sin(a), cos(a));
     float s = 0.0;
-    for (int i = 0; i < 16; i++)
-        s += texture(uShadowMap, vec3(c.xy + R * POISSON[i] * uShadowTexel * 2.2, c.z - 0.0006));
-    return s / 16.0;
+    for (int i = 0; i < PCF_N; i++)        // 2048 のときと同じくらいのぼかしの幅（画素が 2 倍の大きさなので半分）
+        s += texture(uShadowMap, vec3(c.xy + R * POISSON[i] * uShadowTexel * 1.3, c.z - 0.0008));
+    return s / float(PCF_N);
 }
 
 vec3 light(vec3 L, vec3 col, vec3 N, vec3 V, vec3 diffCol, vec3 F0, float shine) {

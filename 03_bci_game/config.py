@@ -275,7 +275,7 @@ QUALITY_ACTIVE = "light"      # 実際に選ばれた段階（apply_quality で�
 SCENE_SHADING = "basic"       # 3D の場面のシェーダー（apply_quality で決まる）
 SPHERE_SUBDIV = 1             # 球（アイコスフィア）の分割回数（apply_quality で決まる）
 SHADOW_MODE = "ellipse"       # 影の方式（apply_quality で決まる。shadows.py）
-SHADOW_MAP_SIZE = 2048        # シャドウマップの大きさ [画素]（画質 high。机の幅 1 に約 1,700 画素）
+SHADOW_MAP_SIZE = 1024        # シャドウマップの大きさ [画素]（画質 high。机の幅 1 に約 850 画素。2048 だとカメラモードで約 52 fps）
 
 # ---- 新しいシェーダー（SCENE_SHADING = "full"）の光と色（scene3d.py）----
 #   色は sRGB で書き、シェーダーの中で線形にして計算する
