@@ -20,6 +20,8 @@ COLUMNS = ["time_sec", "state", "mode", "gaze_x", "gaze_y", "dwell_target", "dwe
            "rival_level", "rival_x", "rival_y", "rival_state", "rival_score", "rival_holding", "freezes",
            # 手の映る大きさ（手首 → 中指の付け根、画像の幅に対する割合。速度をこれで割る。config.HAND_REF_SIZE を参照）
            "hand_size",
+           # 視線が吸い付いている対象の画面の位置（gaze_x, gaze_y と比べて、ずれの向きを調べる）
+           "focus_x", "focus_y",
            "event"]
 
 

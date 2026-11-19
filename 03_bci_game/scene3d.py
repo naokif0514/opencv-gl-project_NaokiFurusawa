@@ -82,6 +82,8 @@ class Scene3D:
         self.robot_view = RobotView(self)
         self.rival_view = RobotView(self, RIVAL_PALETTE)   # チャレンジのライバル（赤）
         self.rim_color = config.BASKET_RIM_HQ              # 今描いているカゴの光る線の色
+        self.rim_boost = 0.0                               # カゴの光る線を明るくする量（視線が吸い付いているとき）
+        self.focus = (None, 0.0)                           # 視線が吸い付いている対象の id と、たまり具合 0〜1
         # 画質 standard / high では作り込んだ物・カゴのモデル、light では以前の簡単な形（重さを変えないため）
         self.item_models = load_obj(ITEM_MODEL_PATH) if self.full else None
         # 影：light = 楕円、standard = 柔らかい影の画像、high = シャドウマップ + 薄い接地の影（shadows.py）
@@ -183,13 +185,22 @@ class Scene3D:
                     color = tuple(v * 0.55 for v in config.BASKET_COLOR_HQ)
                 elif role == "rim":
                     color = self.rim_color
+                    emissive += self.rim_boost
             self.draw(mesh, M, rot, color, emissive=emissive, material=material)
+
+    def _glow(self, it, selected):
+        """物の光り方：行き先に決まった物 0.35、視線が吸い付いている物は見つめるほど明るく（どれに吸い付いているか分かるように）"""
+        glow = 0.35 if selected else 0.0
+        fid, fp = self.focus
+        if fid is not None and fid == it.id:
+            glow = max(glow, 0.15 + 0.5 * fp)
+        return glow
 
     def _item_model(self, it, t, selected):
         """作り込んだモデルで物を描く（大きさ・高さは以前の簡単な形と同じ）"""
         spec = it.spec
         r = spec["radius"]
-        glow = 0.35 if selected else 0.0
+        glow = self._glow(it, selected)
         name = {"cube": "box", "cylinder": "can", "sphere": "ball", "star": "bonus"}[spec["shape"]]
         S = scale(r, r, r)
         if name == "bonus":                     # 回りながら上下にゆれる。輪は傾けて別に回す
@@ -239,7 +250,7 @@ class Scene3D:
         r = spec["radius"]
         h = it.height
         rot = rotate_y(it.angle)
-        glow = 0.35 if selected else 0.0
+        glow = self._glow(it, selected)
         shape = spec["shape"]
         mat = spec.get("finish", "plastic")
         if shape == "cube":
@@ -270,9 +281,11 @@ class Scene3D:
             self._basket(config.RIVAL_GOAL_POS, RIVAL_RIM, RIVAL_BASKET_COLOR)
 
     def _basket(self, pos=config.GOAL_POS, rim=config.BASKET_RIM_HQ, light_color=BASKET_COLOR):
-        """ゴールのカゴ：底と 4 枚の壁（上が開いた箱）"""
+        """ゴールのカゴ：底と 4 枚の壁（上が開いた箱）。視線が吸い付いているプレイヤーのカゴは、縁を明るくする"""
         g = np.asarray(pos)
         self.rim_color = rim
+        fid, fp = self.focus
+        self.rim_boost = (0.3 + 1.0 * fp) if (fid == "goal" and tuple(pos) == tuple(config.GOAL_POS)) else 0.0
         R = config.GOAL_RADIUS * 0.92
         hgt = 0.045
         th = 0.006
@@ -288,12 +301,12 @@ class Scene3D:
         for dx, dz, sx, sz in ((R, 0, th, R), (-R, 0, th, R), (0, R, R, th), (0, -R, R, th)):
             cc = c + np.array([dx, hgt / 2, dz])
             self.draw(self.meshes.cube, translate(*cc) @ scale(sx, hgt / 2, sz), I, wall, spec=0.2,
-                      material="gunmetal")
+                      material="gunmetal", emissive=0.0 if self.full else 0.4 * self.rim_boost)
             if self.full:                          # 上の縁の発光ライン（ゴールの目印）
                 rc = c + np.array([dx, hgt + 0.001, dz])
                 self.draw(self.meshes.cube, translate(*rc) @ scale(max(sx * 0.6, 0.0035) if sx < R else sx, 0.001,
                                                                   max(sz * 0.6, 0.0035) if sz < R else sz), I,
-                          rim, emissive=0.6, material="plastic")
+                          rim, emissive=0.6 + self.rim_boost, material="plastic")
 
     def _table(self):
         I = np.identity(4, dtype=np.float32)
@@ -332,7 +345,9 @@ class Scene3D:
         """描くロボットの一覧：(Robot, RobotView, 持っている物, 凍った見た目 0〜1)"""
         bots = [(robot, self.robot_view, held, 0.0)]
         if rival is not None:
-            bots.append((rival.robot, self.rival_view, rival.held, min(1.0, rival.frozen_t / 0.25)))
+            fid, fp = self.focus                           # 見つめているあいだ、少しずつ凍った見た目に近づく
+            look = 0.45 * fp if fid == "rival" else 0.0
+            bots.append((rival.robot, self.rival_view, rival.held, max(min(1.0, rival.frozen_t / 0.25), look)))
         return bots
 
     def _draw_objects(self, bots, items, t, selected):
@@ -409,8 +424,12 @@ class Scene3D:
         d.blob(self._shadow_point(pose.elbow, arm_h, False), 0.017, 0.22)
         d.blob(self._shadow_point(tip, arm_h, False), 0.019, 0.30)
 
-    def render(self, viewport, robot, items, held, t, dt, selected=None, rival=None):
-        """viewport：glViewport の値（左下原点、画素）。rival：チャレンジのライバル（rival.Rival。なければ None）"""
+    def render(self, viewport, robot, items, held, t, dt, selected=None, rival=None, focus=None):
+        """
+        viewport：glViewport の値（左下原点、画素）。rival：チャレンジのライバル（rival.Rival。なければ None）、
+        focus：視線が吸い付いている対象 (id, たまり具合 0〜1)（その物を光らせる）
+        """
+        self.focus = focus if focus is not None else (None, 0.0)
         bots = self._bots(robot, held, rival)
         gl.glViewport(*viewport)
         self.update_camera(robot, dt, viewport[2] / max(viewport[3], 1))

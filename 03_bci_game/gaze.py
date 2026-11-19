@@ -76,7 +76,7 @@ class OneEuroFilter:
 
 class GazeCalibration:
     """
-    5 点の視線キャリブレーション（視線同期）と、そのあとの確認。
+    視線キャリブレーション（視線同期。GAZE_CALIB_POINTS = 9 なら 3×3 の 9 点で 2 次式、5 点なら 1 次式）と、そのあとの確認。
       1. 学習（"calib"）：points を順に見つめてもらい、特徴量 → 画面の位置の線形モデルを作る
       2. 確認（"check"）：学習に使っていない check_points を見つめてもらい、モデルで予測した位置との
          平均のずれ（check_error）を測る。学習した点での誤差（residual）は実際より小さく出るので、こちらで判定する
@@ -91,6 +91,8 @@ class GazeCalibration:
         self.model = None           # (Ax, Ay)：x = Ax · [1, f0, f2]、y = Ay · [1, f1, f3]
         self.residual = None        # 学習した点での平均のずれ [画素]
         self.check_error = None     # 確認の点での平均のずれ [画素]
+        self.check_dx, self.check_dy = [], []   # 確認の点ごとの左右・上下のずれ [画素]（ログ用）
+        self.dropped_point = None   # 外れ値として除いた学習の点の番号（ログ用）
         self.best_model, self.best_error = None, None
         self.tries = 0              # 確認で失敗した回数
 
@@ -163,9 +165,11 @@ class GazeCalibration:
                     return self._finish()
                 self.phase, self.index = "check", 0
             elif self.phase == "check" and self.index >= len(self.check_points):
-                F = np.array([np.median(s, axis=0) for s in self.check_samples])
+                F = np.array([np.median(self._clean(s), axis=0) for s in self.check_samples])
                 pred = np.array([self.predict(f) for f in F])
-                self.check_error = float(np.mean(np.linalg.norm(pred - np.array(self.check_points), axis=1)))
+                diff = pred - np.array(self.check_points)
+                self.check_dx, self.check_dy = diff[:, 0].tolist(), diff[:, 1].tolist()   # ログ用（左右・上下のずれ）
+                self.check_error = float(np.mean(np.linalg.norm(diff, axis=1)))
                 return self._finish()
         return False
 
@@ -189,28 +193,74 @@ class GazeCalibration:
     def use_best(self):
         self.model, self.check_error = self.best_model, self.best_error
 
+    def _clean(self, samples):
+        """1 点ぶんの特徴量から外れ値を除く（中央値から、中央値からのずれの中央値の GAZE_OUTLIER_MAD 倍以上離れたもの）"""
+        S = np.asarray(samples)
+        if len(S) < 5:
+            return S
+        med = np.median(S, axis=0)
+        mad = np.maximum(np.median(np.abs(S - med), axis=0), 1e-6)
+        keep = np.all(np.abs(S - med) <= config.GAZE_OUTLIER_MAD * 1.4826 * mad, axis=1)
+        return S[keep] if keep.sum() >= 3 else S
+
     def _fit(self):
-        F = np.array([np.median(s, axis=0) for s in self.samples])        # 点ごとの中央値 (5, 4)
-        P = np.array(self.points)                                          # (5, 2)
-        models = []
-        for axis, cols in ((0, (0, 2)), (1, (1, 3))):
-            X = np.column_stack([np.ones(len(F)), F[:, cols[0]], F[:, cols[1]]])
-            # 特徴量の大きさをそろえてから弱いリッジ回帰（切片には正則化をかけない）
-            scale = np.maximum(X.std(axis=0), 1e-6)
-            scale[0] = 1.0
-            Xs = X / scale
-            reg = config.GAZE_RIDGE * np.diag([0.0, 1.0, 1.0])
-            a = np.linalg.solve(Xs.T @ Xs + reg, Xs.T @ P[:, axis]) / scale
-            models.append(a)
-        self.model = models
-        pred = np.array([self.predict(f) for f in F])
-        self.residual = float(np.mean(np.linalg.norm(pred - P, axis=1)))
+        """
+        特徴量 → 画面の位置の変換式を学習する。
+          ・各点の特徴量から外れ値を除いて中央値をとる（点が移った直後の GAZE_CALIB_SETTLE 秒はもともと集めていない）
+          ・9 点なら 2 次式、5 点なら 1 次式（リッジ回帰。2 次の項は強めに正則化）
+          ・9 点のとき、ずれがほかより大きく外れた点は 1 個まで除いて学び直す
+        """
+        F = np.array([np.median(self._clean(s), axis=0) for s in self.samples])
+        P = np.array(self.points)
+        use = np.ones(len(F), dtype=bool)
+        self.model = _fit_model(F, P)
+        if len(F) >= 9:
+            err = np.linalg.norm(np.array([self.predict(f) for f in F]) - P, axis=1)
+            worst = int(np.argmax(err))
+            if err[worst] > config.GAZE_POINT_OUTLIER * max(np.median(err), 1.0):
+                use[worst] = False
+                self.model = _fit_model(F[use], P[use])
+        self.dropped_point = None if use.all() else int(np.argmin(use))
+        pred = np.array([self.predict(f) for f in F[use]])
+        self.residual = float(np.mean(np.linalg.norm(pred - P[use], axis=1)))
 
     def predict(self, feat):
         if self.model is None or feat is None:
             return None
-        ax, ay = self.model
-        return np.array([ax @ [1.0, feat[0], feat[2]], ay @ [1.0, feat[1], feat[3]]])
+        return _predict_model(self.model, feat)
+
+
+def _design(F, quad):
+    """
+    変換式の説明変数。特徴量 f = [虹彩の左右, 上下, 顔の向きの左右, 上下] を標準化した z から：
+      x（左右）：1, z0, z2（+ 2 次式なら z0², z0·z1, z1²）
+      y（上下）：1, z1, z3（+ 2 次式なら z1², z0·z1, z0²）
+    """
+    one = np.ones(len(F))
+    cols_x = [one, F[:, 0], F[:, 2]]
+    cols_y = [one, F[:, 1], F[:, 3]]
+    if quad:
+        cols_x += [F[:, 0] ** 2, F[:, 0] * F[:, 1], F[:, 1] ** 2]
+        cols_y += [F[:, 1] ** 2, F[:, 0] * F[:, 1], F[:, 0] ** 2]
+    return np.column_stack(cols_x), np.column_stack(cols_y)
+
+
+def _fit_model(F, P):
+    quad = len(F) >= 9
+    mu, sd = F.mean(axis=0), np.maximum(F.std(axis=0), 1e-6)
+    Z = (F - mu) / sd
+    model = {"mu": mu, "sd": sd, "quad": quad}
+    for axis, X in zip(("ax", "ay"), _design(Z, quad)):
+        k = X.shape[1]
+        reg = np.diag([0.0] + [config.GAZE_RIDGE] * 2 + [config.GAZE_RIDGE_QUAD] * (k - 3))
+        model[axis] = np.linalg.solve(X.T @ X + reg, X.T @ P[:, 0 if axis == "ax" else 1])
+    return model
+
+
+def _predict_model(model, feat):
+    z = ((np.asarray(feat, dtype=np.float64) - model["mu"]) / model["sd"])[None, :]
+    X, Y = _design(z, model["quad"])
+    return np.array([float(X[0] @ model["ax"]), float(Y[0] @ model["ay"])])
 
 
 class FixationFilter:

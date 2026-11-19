@@ -335,7 +335,8 @@ class GameView:
         m = g.mission
         held = m.held if m is not None else None
         sel = g.selected if isinstance(g.selected, int) else None
-        g.scene.render(self._vp(*SCENE_RECT), g.robot, g.field.items, held, t, dt, sel, rival=g.rival)
+        focus = (g.dwell.focus, g.dwell.progress) if g.state == "play" and not g.recalibrating else None
+        g.scene.render(self._vp(*SCENE_RECT), g.robot, g.field.items, held, t, dt, sel, rival=g.rival, focus=focus)
         self._full_viewport()
 
         if g.state == "play" and not g.recalibrating:
@@ -376,7 +377,7 @@ class GameView:
         # ---- HUD の帯 ----
         b.rect(0, 0, W, HUD, (0.03, 0.04, 0.07, 0.86))
         b.rect(0, HUD, W, 2, (0.3, 0.45, 0.65, 0.9))
-        if m is not None:
+        if m is not None and g.state != "gaze_calib":
             frac = m.time_left / config.GAME_TIME
             col = (1.0, 0.35, 0.3) if m.time_left < 20 else (0.4, 0.85, 1.0)
             b.rect(470, 44, 300, 6, (0.15, 0.18, 0.25, 1))
@@ -451,10 +452,9 @@ class GameView:
             self._progress_ring(p, 26, cal.collect_progress, col)
 
     def _pip_rect(self):
-        """小さなカメラ映像の位置。視線同期の間は、右下の点を隠さないよう画面の下の中央へ"""
-        if self.g.state == "gaze_calib":
-            pw, ph = config.PIP_RECT[2:]
-            return (W / 2 - pw / 2, H - 16 - ph, pw, ph)
+        """小さなカメラ映像の位置。視線同期の間は、点を隠さないよう小さくして、点のない場所へ"""
+        if self.g.state == "gaze_calib":     # 9 点・確認の点のどれとも重ならない位置（下の、中央と右の点の間）に小さく
+            return (800, H - 14 - 120, 160, 120)
         return config.PIP_RECT
 
     def _draw_hand_calib(self):
@@ -484,6 +484,53 @@ class GameView:
         b.rect(PX, PY + PH + 6, PW * hc.progress, 8, (*mag, 1.0))
         if not self.g.recalibrating:
             self._card((40, 150, 330, 250), (0.4, 0.9, 1.0))       # 遊び方
+
+    def _text_hud(self, img, g, m):
+        """HUD の数字（スコア・ライバル / 集めた数・残り時間・コンボ・ライバル / 同期の状態）"""
+        # ---- HUD：スコア・集めた数・残り時間・コンボ・同期の状態（計器の表示）----
+        score = m.result.score if m else 0
+        self._jt(img, "SCORE", "", 24, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
+        self._jt(img, f"{score:05d}", f"{score}", 24, 22, 30, GOLD, font="display", bold=True, tracking=0.06)
+        rv = g.rival
+        if rv is not None:                     # チャレンジ：集めた数の代わりにライバルのスコア
+            self._jt(img, "RIVAL", "", 250, 7, 13, RIVAL_RED, font="tech", bold=True, tracking=0.25)
+            self._jt(img, f"{rv.score:05d}", f"{rv.score}", 250, 22, 30, RIVAL_RED, font="display", bold=True,
+                     tracking=0.06)
+        else:
+            self._jt(img, "ITEMS", "", 250, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
+            self._jt(img, f"{m.result.collected if m else 0:02d}", "", 250, 22, 30, INK, font="display", bold=True)
+        tl = m.time_left if m else config.GAME_TIME
+        self._jt(img, "TIME", "", 470, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
+        self._jt(img, f"{tl:05.1f}", f"{tl:3.0f}", 770, 10, 24, BAD if tl < 20 else INK, "right", font="display")
+        self._jt(img, "COMBO", "", 830, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
+        self._jt(img, f"x{m.combo_mult:.1f}" if m else "x1.0", "", 925, 12, 24, GOLD if (m and m.combo > 0) else INK,
+                 font="display")
+        if rv is not None:                    # チャレンジ：ライバルの状態（動いている / 止まっている / 止められるまで）
+            st, left = rv.status
+            if st == "frozen":
+                code, sub, col = "FROZEN", f"止まっている　残り {left:3.1f} 秒", ICE
+            elif st == "cooldown":
+                code, sub, col = "ACTIVE", f"止められるまで {left:3.0f} 秒", RIVAL_RED
+            else:
+                code, sub, col = "ACTIVE", "見つめて止められる", RIVAL_RED
+            self._jt(img, f"RIVAL  {config.RIVAL_LEVEL_NAMES[rv.level][0]}", "", 1050, 7, 13, DIM, font="tech",
+                     bold=True, tracking=0.25)
+            self._jt(img, code, code, 1050, 22, 18, col, font="tech", bold=True, tracking=0.12)
+            self._jt(img, sub, "", 1050, 42, 13, ICE if st == "ready" else DIM)
+        elif not self._degrade_mode():        # ノーマル（劣化なし）：同期の状態は出さず、モードだけ
+            self._jt(img, "MODE", "", 1050, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
+            self._jt(img, "NORMAL", "NORMAL", 1050, 22, 18, DIM, font="tech", bold=True, tracking=0.12)
+        else:                                 # 電極劣化あり（config.DEGRADE_ENABLED）：同期の状態
+            state, text, col = self._sync_state()
+            code = {"good": "LINK  STABLE", "degraded": "LINK  DEGRADED", "resync": "RESYNC",
+                    "none": "LINK  OFFLINE"}[state]
+            self._jt(img, "NEURAL LINK", "", 1050, 7, 13, DIM if state != "degraded" else (255, 220, 210),
+                     font="tech", bold=True, tracking=0.25)
+            self._jt(img, code, code, 1050, 22, 18, col, font="tech", bold=True, tracking=0.12)
+            sub = {"good": "同期 良好", "degraded": "L で再同期", "resync": f"残り {g.hand_calib.remaining:3.0f} 秒",
+                   "none": "同期前"}[state]
+            self._jt(img, sub, "", 1050, 42, 13, col if state == "degraded" else DIM)
+
 
     def _sync_state(self):
         """(状態, 表示する文字, 色)：同期の状態"""
@@ -645,49 +692,9 @@ class GameView:
         g = self.g
         m = g.mission
 
-        # ---- HUD：スコア・集めた数・残り時間・コンボ・同期の状態（計器の表示）----
-        score = m.result.score if m else 0
-        self._jt(img, "SCORE", "", 24, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
-        self._jt(img, f"{score:05d}", f"{score}", 24, 22, 30, GOLD, font="display", bold=True, tracking=0.06)
         rv = g.rival
-        if rv is not None:                     # チャレンジ：集めた数の代わりにライバルのスコア
-            self._jt(img, "RIVAL", "", 250, 7, 13, RIVAL_RED, font="tech", bold=True, tracking=0.25)
-            self._jt(img, f"{rv.score:05d}", f"{rv.score}", 250, 22, 30, RIVAL_RED, font="display", bold=True,
-                     tracking=0.06)
-        else:
-            self._jt(img, "ITEMS", "", 250, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
-            self._jt(img, f"{m.result.collected if m else 0:02d}", "", 250, 22, 30, INK, font="display", bold=True)
-        tl = m.time_left if m else config.GAME_TIME
-        self._jt(img, "TIME", "", 470, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
-        self._jt(img, f"{tl:05.1f}", f"{tl:3.0f}", 770, 10, 24, BAD if tl < 20 else INK, "right", font="display")
-        self._jt(img, "COMBO", "", 830, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
-        self._jt(img, f"x{m.combo_mult:.1f}" if m else "x1.0", "", 925, 12, 24, GOLD if (m and m.combo > 0) else INK,
-                 font="display")
-        if rv is not None:                    # チャレンジ：ライバルの状態（動いている / 止まっている / 止められるまで）
-            st, left = rv.status
-            if st == "frozen":
-                code, sub, col = "FROZEN", f"止まっている　残り {left:3.1f} 秒", ICE
-            elif st == "cooldown":
-                code, sub, col = "ACTIVE", f"止められるまで {left:3.0f} 秒", RIVAL_RED
-            else:
-                code, sub, col = "ACTIVE", "見つめて止められる", RIVAL_RED
-            self._jt(img, f"RIVAL  {config.RIVAL_LEVEL_NAMES[rv.level][0]}", "", 1050, 7, 13, DIM, font="tech",
-                     bold=True, tracking=0.25)
-            self._jt(img, code, code, 1050, 22, 18, col, font="tech", bold=True, tracking=0.12)
-            self._jt(img, sub, "", 1050, 42, 13, ICE if st == "ready" else DIM)
-        elif not self._degrade_mode():        # ノーマル（劣化なし）：同期の状態は出さず、モードだけ
-            self._jt(img, "MODE", "", 1050, 7, 13, DIM, font="tech", bold=True, tracking=0.25)
-            self._jt(img, "NORMAL", "NORMAL", 1050, 22, 18, DIM, font="tech", bold=True, tracking=0.12)
-        else:                                 # 電極劣化あり（config.DEGRADE_ENABLED）：同期の状態
-            state, text, col = self._sync_state()
-            code = {"good": "LINK  STABLE", "degraded": "LINK  DEGRADED", "resync": "RESYNC",
-                    "none": "LINK  OFFLINE"}[state]
-            self._jt(img, "NEURAL LINK", "", 1050, 7, 13, DIM if state != "degraded" else (255, 220, 210),
-                     font="tech", bold=True, tracking=0.25)
-            self._jt(img, code, code, 1050, 22, 18, col, font="tech", bold=True, tracking=0.12)
-            sub = {"good": "同期 良好", "degraded": "L で再同期", "resync": f"残り {g.hand_calib.remaining:3.0f} 秒",
-                   "none": "同期前"}[state]
-            self._jt(img, sub, "", 1050, 42, 13, col if state == "degraded" else DIM)
+        if g.state != "gaze_calib":            # 視線同期の間は、HUD の帯に説明を出すので、数字は出さない
+            self._text_hud(img, g, m)
 
         # ---- 視線の合わせ直しの案内（カメラモードのプレイ中、HUD の下に小さく）----
         if g.state == "play" and not g.test_mode:
@@ -718,7 +725,8 @@ class GameView:
             check = cal.phase == "check"
             n = len(cal.check_points if check else cal.points)
             title = "ずれを確認します" if check else "視線を合わせます"
-            self._jt(img, f"{title}　{min(cal.index + 1, n)} / {n}", "GAZE SYNC", cx, HUD + 10, 26,
+            # 説明は HUD の帯の中に（9 点のいちばん上の列・確認の点と重ならない）
+            self._jt(img, f"{title}　{min(cal.index + 1, n)} / {n}", "GAZE SYNC", cx, 1, 19,
                      GOLD if check else ACCENT, "center", bold=True)
             face = g.vision.get_state().face_detected if g.vision else False
             if not face:
@@ -727,12 +735,12 @@ class GameView:
                 guide = "金色の点を見つめてください。"
             else:
                 guide = "光る点を、顔を動かさずに目で追ってください。あなたの目の動きと画面の位置を対応づけます。"
-            self._jt(img, guide, "look at the dot", cx, HUD + 48, 15, INK if face else BAD, "center")
+            self._jt(img, guide, "look at the dot", cx, 27, 12, INK if face else BAD, "center")
             if cal.tries > 0:
                 last = f"前回のずれ 約 {cal.check_error:.0f} 画素（{config.GAZE_CHECK_MAX_ERR:.0f} 以下で合格）→ {cal.tries + 1} 回目"
                 if cal.can_skip:
                     last += f"　　ENTER：今までで一番よい結果（約 {cal.best_error:.0f} 画素）で進む"
-                self._jt(img, last, "retry", cx, HUD + 74, 13, GOLD, "center")
+                self._jt(img, last, "retry", cx, 44, 11, GOLD, "center")
         if g.hand_calib.active:
             hc = g.hand_calib
             title = "RESYNC" if g.recalibrating else "HAND SYNC"

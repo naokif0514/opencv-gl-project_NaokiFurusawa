@@ -118,6 +118,7 @@ class Game:
         self.resume_play = False
         self.selected = None
         self.lock_time = -1e9          # 最後に行き先を決めた時刻（time.monotonic）
+        self.last_gaze = None          # 直前の注視点（まばたき中に使う。ログにも使う）
         self.game_mode = getattr(args, "mode", None) or "normal"   # "normal"（一人）/ "challenge"（ライバルと対戦）
         self.rival_level = getattr(args, "rival", None) or config.RIVAL_LEVEL   # ライバルの強さ（タイトルで切りかえ）
         self.rival = None                # チャレンジのライバル（rival.Rival）
@@ -369,6 +370,9 @@ class Game:
         if vs.hand_open is not None:
             self.last_g = 1.0 - vs.hand_open             # 手が一瞬見えなくなっても、握り具合は直前の値を保つ
         gaze = self.gaze.update(vs.gaze_feat, dt, feat_time=vs.gaze_time) if self.gaze.calibrated else None
+        if gaze is None and vs.blink:                    # まばたき中は、直前の注視点のまま（選択が途切れないように）
+            gaze = self.last_gaze
+        self.last_gaze = gaze
         return vs.hand, self.last_g, gaze, vs.blobs, vs.gaze_feat
 
     # --------------------------------------------------------
@@ -455,6 +459,7 @@ class Game:
                 else:
                     # 確認の点でのずれが大きい：もう一度（ENTER で今までで一番よかった結果で進める）
                     self.events.append(f"gaze_calib_retry:err_px={cal.check_error:.0f}")
+                    self.events.append(self._check_axes_event(cal))
                     self.notify(f"ずれ 約 {cal.check_error:.0f} 画素（目標 {config.GAZE_CHECK_MAX_ERR:.0f} 以下）"
                                 f" → もう一度", 3.5)
                     cal.start()
@@ -476,7 +481,15 @@ class Game:
         self.notify(f"視線同期 完了（ずれ 約 {cal.check_error:.0f} 画素）")
         self.events.append(f"gaze_calib_ok:err_px={cal.check_error:.0f}:train_px={cal.residual:.0f}"
                            f":tries={cal.tries + 1}" + (":best" if best else ""))
+        self.events.append(self._check_axes_event(cal))
         self.after_gaze_calib()
+
+    @staticmethod
+    def _check_axes_event(cal):
+        """ログ用：確認の点ごとの左右・上下のずれ（予測 − 点、画素）と、外れ値として除いた学習の点"""
+        dx = ",".join(f"{v:+.0f}" for v in cal.check_dx)
+        dy = ",".join(f"{v:+.0f}" for v in cal.check_dy)
+        return f"gaze_check_axes:n={len(cal.points)}:dx={dx}:dy={dy}:dropped={cal.dropped_point}"
 
     def after_gaze_calib(self):
         if self.resume_play:
@@ -704,6 +717,11 @@ class Game:
             p = self.scene.project(pos, h, SCENE_RECT)
             if p is not None:
                 self.gaze.correct(p)
+        # ログ用：決まったときの、対象の画面の位置と注視点（上下・左右にずれやすいかを、あとで調べるため）
+        p = self.scene.project(pos, h, SCENE_RECT)
+        g = self.last_gaze
+        if p is not None and g is not None:
+            self.events.append(f"lock_at:{chosen}:{p[0]:.0f},{p[1]:.0f}:{g[0]:.0f},{g[1]:.0f}")
         self.selected = chosen
         self.lock_time = time.monotonic()
         self.robot.approach(pos)
@@ -785,6 +803,8 @@ class Game:
             (self.rival.held.type if self.rival.held is not None else ""),
             freezes=None if (m is None or self.rival is None) else self.rival.freezes,
             hand_size=None if (self.vision is None or self.test_mode) else self.vision.get_state().hand_size,
+            focus_x=None if self.dwell.focus_pos is None else float(self.dwell.focus_pos[0]),
+            focus_y=None if self.dwell.focus_pos is None else float(self.dwell.focus_pos[1]),
             event=";".join(self.events))
         self.events = []
 

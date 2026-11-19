@@ -47,6 +47,7 @@ class VisionState:
     gaze_time: float = 0.0                  # その特徴量を計算したフレームの時刻
     face_detected: bool = False
     blobs: list = field(default_factory=list)
+    blink: bool = False                     # まばたき中（このあいだは gaze_feat = None。顔は見つかっている）
     fps: float = 0.0                        # カメラ処理のフレームレート
     face_fps: float = 0.0
     hand_fps: float = 0.0
@@ -63,6 +64,18 @@ EYES = (
     (263, 362, 386, 374, 473),     # 画像の右側に写る目
 )
 NOSE_TIP = 1
+
+
+def eye_open_ratio(lm, w, h):
+    """目の開き具合：上まぶた〜下まぶたの距離 ÷ 目の幅（両目の平均）。まばたきで小さくなる"""
+    r = []
+    for outer, inner, top, bottom, _ in EYES:
+        o, i, t, b = (np.array([lm[k].x * w, lm[k].y * h]) for k in (outer, inner, top, bottom))
+        width = np.linalg.norm(i - o)
+        if width < 1e-6:
+            return None
+        r.append(np.linalg.norm(t - b) / width)
+    return float(np.mean(r))
 
 
 def gaze_features(lm, w, h):
@@ -214,6 +227,7 @@ class VisionThread(threading.Thread):
         self._setup = None
         self.velocity = VelocityEstimator()
         self.size_smooth = None       # なめらかにした手の大きさ
+        self.blink_until = -1e9       # まばたきとみなす時刻の終わり
         self.colors = dict(config.ITEM_COLORS)   # 検出する色（register_color で追加される。差しかえは丸ごと行う）
         self._register_request = None
 
@@ -346,9 +360,15 @@ class VisionThread(threading.Thread):
                 res = face_mesh.process(rgb)
                 if res.multi_face_landmarks:
                     face_lm = res.multi_face_landmarks[0]
-                    st.gaze_feat = gaze_features(face_lm.landmark, w, h)
+                    feat = gaze_features(face_lm.landmark, w, h)
+                    # まばたき中（と、そのあと目が開ききるまで）は、視線の特徴量を使わない
+                    ear = eye_open_ratio(face_lm.landmark, w, h)
+                    if ear is not None and ear < config.GAZE_BLINK_EAR:
+                        self.blink_until = now + config.GAZE_BLINK_HOLD
+                    st.blink = now < self.blink_until
+                    st.gaze_feat = None if st.blink else feat
                     st.gaze_time = now
-                    st.face_detected = st.gaze_feat is not None
+                    st.face_detected = feat is not None
                     xs = [p.x for p in face_lm.landmark]
                     ys = [p.y for p in face_lm.landmark]
                     mx, my = (max(xs) - min(xs)) * 0.15, (max(ys) - min(ys)) * 0.15
