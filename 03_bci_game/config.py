@@ -189,13 +189,14 @@ RIVAL_LEVELS = {
     #  neurons：方向のニューロンの数、noise：ノイズの強さ [Hz]、speed：台座の最高速度 [ワールド/秒]、
     #  think：次の行動を決めるまでの時間 [秒]、steal：プレイヤーが狙う物を横取りしにいく確率、
     #  bump：運んでいるプレイヤーにぶつかったとき物を落とさせる確率、arm：動かしたい手先の速さの上限 [ワールド/秒]、
-    #  pause：着いてからアームを伸ばすまで・つかんでから運び出すまでのためらい [秒]
+    #  pause：着いてからアームを伸ばすまで・つかんでから運び出すまでのためらい [秒]、
+    #  bonus：ボーナス（星）を狙う積極さ（星の価値・星の横取りの確率に掛ける。1 = 普通の物と同じに点数で判断）
     "weak":   {"neurons": 40,  "noise": 12.0, "speed": 0.08, "think": 3.0, "steal": 0.10, "bump": 0.20,
-               "arm": 0.09, "pause": 2.0},
+               "arm": 0.09, "pause": 2.0, "bonus": 0.15},
     "normal": {"neurons": 80,  "noise": 7.0,  "speed": 0.10, "think": 2.8, "steal": 0.35, "bump": 0.40,
-               "arm": 0.12, "pause": 1.7},
+               "arm": 0.12, "pause": 1.7, "bonus": 0.15},
     "strong": {"neurons": 140, "noise": 4.0,  "speed": 0.16, "think": 1.2, "steal": 0.70, "bump": 0.60,
-               "arm": 0.20, "pause": 0.8},
+               "arm": 0.20, "pause": 0.8, "bonus": 0.8},
 }
 RIVAL_LEVEL_NAMES = {"weak": ("WEAK", "弱い"), "normal": ("NORMAL", "普通"), "strong": ("STRONG", "強い")}
 RIVAL_START = (0.5, 0.63)             # ライバルの最初の位置（プレイヤーと机の中心について点対称）

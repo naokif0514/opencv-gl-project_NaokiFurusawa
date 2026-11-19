@@ -151,7 +151,13 @@ class Rival:
         dist = np.linalg.norm(it.pos - self.robot.pos) + np.linalg.norm(it.pos - self.goal_pos) + 0.2
         if np.linalg.norm(it.pos - player.pos) < 0.13:
             pts *= 0.2
+        if it.type == "bonus":                      # 星をどれだけ狙うか（強さの bonus）
+            pts *= self.p["bonus"]
         return pts / dist
+
+    def _steal_prob(self, item):
+        """横取りしにいく確率（星は強さの bonus を掛ける）"""
+        return self.p["steal"] * (self.p["bonus"] if item.type == "bonus" else 1.0)
 
     def _go_to(self, pos):
         """台座を pos の手前（アームが届く距離）へ"""
@@ -165,7 +171,7 @@ class Rival:
         if not cand:
             return None
         if (player_target is not None and player_target in cand and self._can_race(player_target, player)
-                and self.rng.random() < self.p["steal"]):
+                and self.rng.random() < self._steal_prob(player_target)):
             self.steal_tries += 1
             self._log(f"rival_steal_try:{player_target.id}")
             return player_target
@@ -180,7 +186,7 @@ class Rival:
         if self.held is not None or self.frozen or item is None or item is self.target:
             return
         if (self.state in ("think", "go", "reach") and self._can_race(item, player)
-                and self.rng.random() < self.p["steal"]):
+                and self.rng.random() < self._steal_prob(item)):
             self.steal_tries += 1
             self._log(f"rival_steal_try:{item.id}")
             self.target = item
