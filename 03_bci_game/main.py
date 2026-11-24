@@ -12,7 +12,7 @@ BCI オペレーター（ゲーム本体）。実際の BCI 研究の「ハイ�
 
 ■ 画面（状態）の流れ
   title → connect（脳と接続中）→ gaze_calib（視線同期。テストモードでは省略）→ hand_calib（同期フェーズ）
-  → countdown → play（GAME_TIME 秒）→ result（スコア・ハイスコア・プレイ中の脳の活動）→ title
+  → ready（準備 OK：遊び方とルール。SPACE / ENTER / クリックで進む）→ countdown → play（GAME_TIME 秒）→ result（スコア・ハイスコア・プレイ中の脳の活動）→ title
 
 使い方:
     cd 03_bci_game
@@ -294,6 +294,8 @@ class Game:
             self.set_mode("challenge")
         elif key == glfw.KEY_T and self.vision is not None and self.state == "title":
             self.test_mode = not self.test_mode
+        elif self.state == "ready" and go:
+            self.set_state("countdown")
         elif self.state == "gaze_calib" and self.gaze_intro and go:
             self.start_gaze_points()
         elif self.state == "gaze_calib" and key == glfw.KEY_ENTER and self.gaze.calib.can_skip:
@@ -354,6 +356,8 @@ class Game:
                     self.set_rival_level(level)
                 elif self.view.start_button_hit(p):
                     self.start_game()
+            elif action == glfw.PRESS and self.state == "ready":
+                self.set_state("countdown")
             elif action == glfw.PRESS and self.state == "gaze_calib" and self.gaze_intro:
                 self.start_gaze_points()
 
@@ -541,7 +545,7 @@ class Game:
             self.notify("再同期 完了：精度が戻った")
         elif self.state == "hand_calib":
             self.notify("同期 完了")
-            self.set_state("countdown")
+            self.set_state("ready")         # 準備 OK の画面（遊び方とルール）。SPACE / ENTER / クリックでカウントダウンへ
 
     # --------------------------------------------------------
     def update_play(self, dt, gaze, blobs, now):

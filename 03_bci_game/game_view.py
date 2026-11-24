@@ -54,6 +54,7 @@ MODE_TEXT = {"normal": ("NORMAL", "ノーマル　一人で集める"), "challen
 # タイトル画面の中央のルールの説明（脳の表示の代わり）。高さはモードで変わり、上下の真ん中にそろえる
 RULE_AREA = (106, 506)                     # カードを置く上下の範囲（題名の下 〜 カメラ / テストの表示の上）
 GAZE_INTRO_RECT = (240, 140, 800, 400)               # 視線同期の前の説明のカード（x, y, 幅, 高さ）
+READY_RECT = (100, 96, 1080, 400)                   # 手の同期のあとの「準備 OK」のカード（右下のカメラ映像と重ならない高さ）
 RULE_CARD_W = {"normal": 560, "challenge": 760}   # カードの横幅（チャレンジは強さのボタンを横に並べるので広く）
 RULE_LINE_H = 26                           # ルールの 1 行の高さ
 RULES = {
@@ -395,6 +396,11 @@ class GameView:
                 b.ring(*gaze, 11, 1.5, (1.0, 0.8, 0.3, 0.9), 20)
         if g.hand_calib.active:
             self._draw_hand_calib()
+        if g.state == "ready":
+            b.rect(0, HUD, W, H - HUD, (0.0, 0.01, 0.03, 0.6))
+            x, y, w, h = READY_RECT
+            self._card(READY_RECT, (0.4, 0.9, 1.0), 0.95)
+            b.rect(x + w / 2, y + 104, 1, h - 170, (0.25, 0.32, 0.45, 1))    # 遊び方とルールの間の線
         if g.state == "countdown":
             b.rect(0, 0, W, H, (0.0, 0.01, 0.03, 0.45))
 
@@ -509,8 +515,6 @@ class GameView:
             b.ring(*q, 16, 3, (1, 1, 1, 0.9), 28)
         b.rect(PX, PY + PH + 6, PW, 8, (0.15, 0.1, 0.18, 1.0))
         b.rect(PX, PY + PH + 6, PW * hc.progress, 8, (*mag, 1.0))
-        if not self.g.recalibrating:
-            self._card((40, 150, 330, 250), (0.4, 0.9, 1.0))       # 遊び方
 
     def _text_hud(self, img, g, m):
         """HUD の数字（スコア・ライバル / 集めた数・残り時間・コンボ・ライバル / 同期の状態）"""
@@ -714,6 +718,29 @@ class GameView:
             jx = x + w + 10 if anchor == "left" else x + 10
             self._jt(img, ja, "", jx, y + 1, max(13, size - 2), DIM)
 
+    def _text_ready(self, img, g):
+        """手の同期のあとの「準備 OK」の画面：左に遊び方、右にルール（モードごと）"""
+        x, y, w, h = READY_RECT
+        cx = x + w / 2
+        self._jt(img, "READY", "READY", cx, y + 16, 30, ACCENT, "center", font="display", bold=True, tracking=0.25)
+        self._jt(img, "準備 OK：同期が終わりました", "", cx, y + 56, 17, INK, "center", bold=True)
+        lx, rx, ty = x + 50, cx + 50, y + 112
+        self._label(img, "HOW TO PLAY", "遊び方", lx, ty)
+        for i, s in enumerate(STEPS):
+            self._jt(img, f"{i + 1}.  {s}", s, lx, ty + 38 + i * 32, 14, INK)
+        pts = "・".join(f"{'星' if k == 'bonus' else v['name']} {v['points']}" for k, v in config.ITEM_TYPES.items())
+        self._jt(img, f"得点：{pts}（× コンボ）", "", lx, ty + 38 + 4 * 32 + 8, 13, GOLD)
+        mode = g.mode
+        col = (255, 170, 140) if mode == "challenge" else GOOD
+        self._label(img, "RULES", "ルール", rx, ty, col)
+        if mode == "challenge":
+            en, ja = config.RIVAL_LEVEL_NAMES[g.rival_level]
+            self._jt(img, f"RIVAL {en}（{ja}）", en, x + w - 50, ty + 2, 13, RIVAL_RED, "right", font="tech", bold=True,
+                     tracking=0.15)
+        for i, s in enumerate(RULES[mode]):
+            self._jt(img, s, s, rx, ty + 38 + i * 30, 14, INK)
+        self._jt(img, "SPACE / ENTER / クリックでスタート", "SPACE / ENTER", cx, y + h - 46, 18, GOLD, "center", bold=True)
+
     def _text_gaze_intro(self, img, g):
         """視線同期の前の説明の画面（点はまだ出ていない）"""
         x, y, w, h = GAZE_INTRO_RECT
@@ -805,11 +832,9 @@ class GameView:
                 self._jt(img, PHASE_JA[hc.phase], hc.phase, cx, PY + PH + 24, 18, INK, "center")
             self._jt(img, f"REC {hc.valid_sec:04.1f} S", "rec", PX + PW - 10, PY + 8, 13, DIM, "right", font="tech",
                      tracking=0.15)
-            if not g.recalibrating:
-                self._label(img, "HOW TO PLAY", "遊び方", 56, 162)
-                for i, s in enumerate(STEPS):
-                    self._jt(img, f"{i + 1}. {s}", s, 56, 196 + i * 40, 13, INK)
-                self._jt(img, f"制限時間 {config.GAME_TIME:.0f} 秒。小さい物ほど高得点（箱 100・缶 150・玉 250・星 500）", "", 56, 360, 12, GOLD)
+            # 遊び方・ルールは、同期が終わったあとの「準備 OK」の画面で見せる（同期中はターゲットを追うので読めない）
+        if g.state == "ready":
+            self._text_ready(img, g)
         if g.state == "countdown":
             n = int(math.ceil(config.COUNTDOWN_SEC - g.state_t))
             self._jt(img, str(n) if n > 0 else "GO", "GO", cx, H / 2 - 74, 110, (255, 255, 255), "center",
