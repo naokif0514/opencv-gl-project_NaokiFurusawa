@@ -53,7 +53,7 @@ MODE_TEXT = {"normal": ("NORMAL", "ノーマル　一人で集める"), "challen
 # タイトル画面の左のルールの説明と、チャレンジのライバルの強さのボタン
 # タイトル画面の中央のルールの説明（脳の表示の代わり）。高さはモードで変わり、上下の真ん中にそろえる
 RULE_AREA = (106, 506)                     # カードを置く上下の範囲（題名の下 〜 カメラ / テストの表示の上）
-INTRO_RECT = (240, 110, 800, 400)                    # 視線同期・手の同期の前の説明のカード（x, y, 幅, 高さ。右下のカメラ映像と重ならない）
+INTRO_RECT = (240, 125, 800, 370)                    # 視線同期・手の同期の前の説明のカード（x, y, 幅, 高さ。右下のカメラ映像と重ならない）
 READY_RECT = (100, 96, 1080, 400)                   # 手の同期のあとの「準備 OK」のカード（右下のカメラ映像と重ならない高さ）
 RULE_CARD_W = {"normal": 560, "challenge": 760}   # カードの横幅（チャレンジは強さのボタンを横に並べるので広く）
 RULE_LINE_H = 26                           # ルールの 1 行の高さ
@@ -745,15 +745,14 @@ class GameView:
             self._jt(img, s, s, rx, ty + 38 + i * 30, 14, INK)
         self._jt(img, "SPACE / ENTER / クリックでスタート", "SPACE / ENTER", cx, y + h - 46, 18, GOLD, "center", bold=True)
 
-    def _text_intro(self, img, en, title, lines, note, warn, color):
-        """同期の前の説明のカード（視線同期・手の同期で共通）：見出し・手順・注意・警告・始め方"""
+    def _text_intro(self, img, en, title, lines, warn, color):
+        """同期の前の説明のカード（視線同期・手の同期で共通）：見出し・手順・警告・始め方"""
         x, y, w, h = INTRO_RECT
         cx = x + w / 2
         self._jt(img, en, en, cx, y + 22, 30, color, "center", font="display", bold=True, tracking=0.2)
         self._jt(img, title, "", cx, y + 64, 19, INK, "center", bold=True)
         for i, s in enumerate(lines):
             self._jt(img, s, s, x + 56, y + 118 + i * 34, 15, INK)
-        self._jt(img, note, "", cx, y + h - 96, 13, DIM, "center")
         if warn:
             self._jt(img, warn, "warn", cx, y + h - 70, 15, BAD, "center")
         self._jt(img, "SPACE / ENTER / クリックで始める", "SPACE / ENTER", cx, y + h - 42, 18, GOLD, "center",
@@ -768,8 +767,7 @@ class GameView:
             "3.  ターゲットは 8 方向に行き来したあと、円をえがいて動きます。",
             "4.  最後は「GRIP（握る）」「OPEN（開く）」の合図に合わせて、",
             "      手を握る・開くをくり返してください。",
-        ], "同期中は、今やることだけをパッドの下に出します。",
-            None if hand else "手が見つかりません：右手をカメラに映してください", MAGENTA)
+        ], None if hand else "手が見つかりません：右手をカメラに映してください", MAGENTA)
 
     def _text_gaze_intro(self, img, g):
         """視線同期の前の説明の画面（点はまだ出ていない）"""
@@ -785,7 +783,7 @@ class GameView:
         ]
         face = g.vision.get_state().face_detected if g.vision else False
         self._text_intro(img, "GAZE SYNC", f"視線を合わせます（約 {sec:.0f} 秒）", lines,
-                         "点が出ている間は、説明は出ません。", None if face else "顔が見つかりません：カメラの正面へ", ACCENT)
+                         None if face else "顔が見つかりません：カメラの正面へ", ACCENT)
 
     def _text_game(self, fps):
         img = self.overlay_img
