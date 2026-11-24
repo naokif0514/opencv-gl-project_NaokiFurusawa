@@ -175,8 +175,8 @@ ITEM_TYPES = {
               "name": "箱", "finish": "cardboard"},
     "can":   {"shape": "cylinder", "rgb": (0.25, 0.85, 0.42), "radius": 0.028, "points": 150, "weight": 0.3,
               "name": "缶", "finish": "anodized"},
-    "ball":  {"shape": "sphere",   "rgb": (1.00, 0.24, 0.30), "radius": 0.020, "points": 250, "weight": 0.2,
-              "name": "玉", "finish": "glossy"},
+    "ball":  {"shape": "sphere",   "rgb": (0.95, 0.94, 0.90), "radius": 0.020, "points": 250, "weight": 0.2,
+              "name": "玉", "finish": "painted"},       # 野球のボール：白い革（縫い目の赤は scene3d.ITEM_PARTS）
     "bonus": {"shape": "star",     "rgb": (1.00, 0.72, 0.18), "radius": 0.030, "points": 500, "weight": 0.0,
               "name": "ボーナス", "finish": "gold"},
 }

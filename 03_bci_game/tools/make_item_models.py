@@ -131,18 +131,38 @@ def soda_can():
     return {"main": body, "band": band, "metal": metal, "tab": tab, "print": mouth}
 
 
-def tennis_ball():
+def baseball():
+    """野球のボール：白い球に、赤い縫い目（2 列の縫い糸と、その間を V 字にわたる糸）"""
     body = uv_sphere(1.0, (0, 1.0, 0), nu=24, nv=16)
-    # テニスボールの縫い目の曲線（球の上で 2 つの U 字がかみ合う形）
-    pts = []
+    # 縫い目の中心の曲線（球の上で 2 つの U 字がかみ合う形。野球・テニスのボールと同じ）
+    n = 96
     a, b = 0.75, 0.25
-    for i in range(80):
-        t = 2 * math.pi * i / 80
+    C = []
+    for i in range(n):
+        t = 2 * math.pi * i / n
         p = np.array([a * math.cos(t) + b * math.cos(3 * t), a * math.sin(t) - b * math.sin(3 * t),
                       2 * math.sqrt(a * b) * math.sin(2 * t)])
-        p = p / np.linalg.norm(p) * 1.004
-        pts.append(p + np.array([0, 1.0, 0]))
-    seam = tube(pts, 0.045, sides=5)
+        C.append(p / np.linalg.norm(p))
+    C = np.array(C)
+    W, LIFT = 0.075, 1.006                     # 縫い糸の列の、中心の曲線からのずれ・球の表面から少し浮かせる
+    left, right, seam = [], [], Mesh()
+    for i in range(n):
+        tg = C[(i + 1) % n] - C[i - 1]
+        side = np.cross(C[i], tg)
+        side /= np.linalg.norm(side)
+        left.append(C[i] + side * W)
+        right.append(C[i] - side * W)
+    up = np.array([0, 1.0, 0])
+
+    def on(p):
+        return p / np.linalg.norm(p) * LIFT + up
+
+    seam.add(tube([on(p) for p in left], 0.035, sides=5))
+    seam.add(tube([on(p) for p in right], 0.035, sides=5))
+    for i in range(0, n, 2):                   # V 字の糸（両側の列から、少し先の中心へ）
+        j = (i + 1) % n
+        for s in (left, right):
+            seam.add(tube([on(s[i]), on(C[j])], 0.026, sides=4, closed=False))
     return {"main": body, "seam": seam}
 
 
@@ -225,7 +245,7 @@ def _rot_y(a):
     return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
 
 
-PARTS = {"box": cardboard_box, "can": soda_can, "ball": tennis_ball, "bonus": bonus_star, "basket": basket}
+PARTS = {"box": cardboard_box, "can": soda_can, "ball": baseball, "bonus": bonus_star, "basket": basket}
 
 
 def main():
