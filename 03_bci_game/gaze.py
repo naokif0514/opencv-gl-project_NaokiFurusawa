@@ -250,7 +250,7 @@ def _fit_model(F, P):
     mu, sd = F.mean(axis=0), np.maximum(F.std(axis=0), 1e-6)
     Z = (F - mu) / sd
     # [B] 同期で見た特徴量の範囲：2 次の項はこの範囲（+ GAZE_QUAD_CLIP）で止めて計算し、外側で伸ばしすぎない
-    model = {"mu": mu, "sd": sd, "quad": quad,
+    model = {"mu": mu, "sd": sd, "quad": quad, "zmin": Z.min(axis=0), "zmax": Z.max(axis=0),
              "zlo": Z.min(axis=0) - config.GAZE_QUAD_CLIP, "zhi": Z.max(axis=0) + config.GAZE_QUAD_CLIP}
     for axis, X in zip(("ax", "ay"), _design(Z, quad)):
         k = X.shape[1]
@@ -261,6 +261,10 @@ def _fit_model(F, P):
 
 def _predict_model(model, feat):
     z = ((np.asarray(feat, dtype=np.float64) - model["mu"]) / model["sd"])[None, :]
+    if config.GAZE_HEAD_CLIP is not None and "zmin" in model:
+        # [1] 顔の向き（特徴量の 2, 3 番目）は、同期で見た範囲 + GAZE_HEAD_CLIP で止める（顔を大きく向けても行き過ぎない）
+        m = config.GAZE_HEAD_CLIP
+        z[:, 2:] = np.clip(z[:, 2:], model["zmin"][2:] - m, model["zmax"][2:] + m)
     X, Y = _design(z, model["quad"])
     if model["quad"] and "zlo" in model:                # [B] 2 次の項だけ、同期で見た範囲で止めた値で計算する
         zc = np.clip(z, model["zlo"], model["zhi"])

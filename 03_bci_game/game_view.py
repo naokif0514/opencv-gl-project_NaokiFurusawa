@@ -369,6 +369,10 @@ class GameView:
         # ---- 重ねる画面 ----
         if g.state == "gaze_calib":
             self._draw_gaze_calib(t)
+            # 金色の確認の点のときだけ、注視点を出す（どこに視線が当たっているか自分で確かめられるように）
+            if g.gaze.calib.active and g.gaze.calib.phase == "check" and gaze is not None:
+                b.circle(*gaze, 6, (1.0, 1.0, 1.0, 0.85), 12)
+                b.ring(*gaze, 11, 1.5, (1.0, 0.8, 0.3, 0.9), 20)
         if g.hand_calib.active:
             self._draw_hand_calib()
         if g.state == "countdown":
