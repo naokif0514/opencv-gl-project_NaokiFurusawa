@@ -211,8 +211,7 @@ HIGHSCORE_FILE = "saves/highscores.json"
 HIGHSCORE_OLD_CHALLENGE_FILE = "saves/highscores_old_challenge.json"   # 以前の「劣化あり」のチャレンジの記録
 HIGHSCORE_OLD_DISTANCE_FILE = "saves/highscores_old_distance.json"     # 距離の倍率があった頃（得点のルールが違う）の記録
 SCORE_RULES = "type_x_combo"          # 今の得点のルール（物の種類の基本点 × コンボ）。ハイスコアのファイルに書いておく
-SCORE_RULES_SINCE = "2026-11-24 14:15"   # ランキングをリセットした日時。これより前の記録は HIGHSCORE_OLD_DISTANCE_FILE へ移す
-                                         # （得点のルールは 14:08 に変えたが、そのあとの 1 件もリセットでいっしょに移した）
+SCORE_RULES_SINCE = "2026-11-24 14:08"   # 今の得点のルールになった日時。これより前の記録は HIGHSCORE_OLD_DISTANCE_FILE へ移す
 HIGHSCORE_KEEP = 10
 
 # ============================================================
