@@ -97,6 +97,15 @@ class GameResult:
     knocked: int = 0                                 # チャレンジ：ライバルにぶつかられて落とした回数
 
 
+def in_basket(pos, goal, item_radius):
+    """カゴに入ったか：物の中心が、カゴの正方形（見た目と同じ大きさ）を物の半径 × GOAL_DROP_MARGIN だけ広げた中にあるか。
+    以前は「グリッパーの先がカゴの中心から GOAL_RADIUS の円の中」で、正方形のカゴの四隅や、
+    半分以上カゴに重なっている物が入らない判定になっていた"""
+    half = config.GOAL_RADIUS * 0.92 + item_radius * config.GOAL_DROP_MARGIN   # 0.92：scene3d.py・カゴのモデルと同じ
+    d = np.abs(np.asarray(pos, dtype=np.float64) - np.asarray(goal, dtype=np.float64))
+    return bool(d[0] <= half and d[1] <= half)
+
+
 def item_points(item, goal, combo_mult):
     """物をカゴに入れたときの点数：物の種類の基本点 × コンボの倍率（つかんだ位置の距離では変えない）。goal は使わない（以前の名残）"""
     return int(round(item.spec["points"] * combo_mult))
@@ -195,8 +204,7 @@ class Mission:
         it.pos = tip.copy()
         it.height = 0.08                 # 少し上から床に落ちる
         self.held = None
-        d = float(np.linalg.norm(tip - np.asarray(config.GOAL_POS)))
-        if d <= config.GOAL_RADIUS:
+        if in_basket(tip, config.GOAL_POS, it.radius):
             pts = self.points_for(it)
             self.result.score += pts
             self.result.collected += 1

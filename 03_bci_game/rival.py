@@ -32,7 +32,7 @@ import numpy as np
 import config
 from cortex_sim import CortexSim
 from hand_calib import HandCalibration, grip_target, target_velocity
-from mission import GripSwitch, gripper_tip, item_points
+from mission import GripSwitch, gripper_tip, in_basket, item_points
 from robot import Robot
 
 
@@ -372,7 +372,7 @@ class Rival:
         it.pos = tip.copy()
         it.height = 0.08
         self.held = None
-        if np.linalg.norm(tip - self.goal_pos) <= config.GOAL_RADIUS:
+        if in_basket(tip, self.goal_pos, it.radius):
             pts = item_points(it, self.goal_pos, self.combo_mult)
             self.score += pts
             self.collected += 1
