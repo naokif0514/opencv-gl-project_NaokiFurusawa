@@ -47,7 +47,6 @@ from OpenGL import GL as gl   # noqa: E402
 import config        # noqa: E402
 import highscore     # noqa: E402
 from brain_model import BrainModel                                  # noqa: E402
-from brain_record import BrainRecord                                # noqa: E402
 from brain_renderer import BrainView                                # noqa: E402
 from cortex_sim import CortexSim                                    # noqa: E402
 from field import Field                                             # noqa: E402
@@ -112,7 +111,6 @@ class Game:
         self.flash_until = 0.0           # 電極劣化の赤いフラッシュ
         self.popups = []                 # (文字, ワールド座標, 出た時刻)：得点の表示
         self.mission = None
-        self.record = BrainRecord()
         self.final = None                # 結果画面に出すもの
         self.recalibrating = False
         self.resume_play = False
@@ -202,7 +200,6 @@ class Game:
             self.last_bump = -1e9
             if self.rival is not None:
                 self.rival.reset()
-            self.record = BrainRecord()
             self.grip_switch = GripSwitch()
             self._prev_score = 0
             cam.yaw, cam.pitch, cam.goal_dist = -100.0, 30.0, 3.7
@@ -321,7 +318,6 @@ class Game:
         elif key == glfw.KEY_L and self.state == "play" and not self.recalibrating:
             self.recalibrating = True                   # 再同期（制限時間は進み続ける）
             self.hand_calib.start()
-            self.record.mark(self.mission.play_time, "recal_start")
             self.mission.log("recalibrate_start")
             self.events.append("recalibrate_start")
             self.notify("再同期：ターゲットを手で追いかける")
@@ -444,8 +440,6 @@ class Game:
                     motor = max(self.cortex.motor_drive, self.cortex.grip_drive)
                     self.brain.update_glow({"fef": selecting, "visual": selecting, "motor": motor, "hand": motor,
                                             "somato": self.cortex.grip_drive}, dt)
-                if self.state == "play":
-                    self.record.update(dt, self.brain.glow, self.cortex.metrics, self.mission.play_time)
 
                 self.view.render(now - start, dt, gaze, fps)
                 self.log_frame(now - start, gaze, g)
@@ -544,7 +538,6 @@ class Game:
             else:
                 self.notify(msg, 4.0)
                 self.recalibrating = False
-                self.record.mark(self.mission.play_time, "recal_end")
             return
         info = self.cortex.fit(*hc.data())
         lv = self.cortex.grip.levels
@@ -553,7 +546,6 @@ class Game:
         self.grip_switch = GripSwitch()
         if self.recalibrating:
             self.recalibrating = False
-            self.record.mark(self.mission.play_time, "recal_end")
             self.mission.log("recalibrate_ok")
             self.notify("再同期 完了：精度が戻った")
         elif self.state == "hand_calib":
@@ -569,7 +561,6 @@ class Game:
         if m.degrade_due():
             k = self.cortex.dropout(config.DEGRADE_FRACTION, config.DEGRADE_GRIP_FRACTION)
             m.log(f"degrade:{k}")
-            self.record.mark(m.play_time, "degrade")
             self.events.append(f"degrade:{k}")
             self.flash_until = time.monotonic() + config.DEGRADE_FLASH_SEC
             self.scene.shake()
@@ -694,7 +685,6 @@ class Game:
         rv, m = self.rival, self.mission
         if rv is None or not rv.freeze():
             return
-        self.record.mark(m.play_time, "freeze")
         self.notify(f"ライバルを止めた！（{config.FREEZE_SEC:.0f} 秒）")
 
     def arm_velocity(self):
@@ -719,7 +709,6 @@ class Game:
                 self.notify(f"つかみ損ね（コンボ ×{m.combo_mult:.1f} に下がった）")
             elif res is not None:
                 self.events.append(f"grasp_ok:{res.type}")
-                self.record.snapshot_raster(self.cortex.raster)
                 self.notify(f"{res.spec['name']}をつかんだ！ カゴを見つめて運ぶ")
                 self.selected = None
             return
@@ -765,13 +754,11 @@ class Game:
             self.rival.on_player_lock(it, self.robot)     # 強さに応じた確率で横取りしにくる
 
     def finish_game(self):
-        """ゲーム終了：ハイスコアに加え、結果画面の振り返りを用意する"""
+        """ゲーム終了：ハイスコアに加え、結果画面に出すものを用意する"""
         m = self.mission
-        if self.record.raster is None:
-            self.record.snapshot_raster(self.cortex.raster)
         scores, rank = highscore.add(m.result.score, m.result.collected, self.score_key)
-        self.final = {"result": m.result, "scores": scores, "rank": rank, "record": self.record, "mode": self.mode,
-                      "key": self.score_key, "usage": self.record.usage(), "rival": None}
+        self.final = {"result": m.result, "scores": scores, "rank": rank, "mode": self.mode,
+                      "key": self.score_key, "rival": None}
         rv = self.rival
         if rv is not None:
             me, them = m.result.score, rv.score
@@ -784,9 +771,7 @@ class Game:
               f"順位 {None if rank is None else rank + 1}"
               + ("" if rv is None else f"、ライバル（{rv.level}）{rv.score}（{rv.collected} 個）→ "
                  f"{self.final['rival']['outcome']}、止めた回数 {rv.freezes}"))
-        # 結果画面の脳：プレイ中にどれだけ使ったかで光らせる
-        self.brain.glow[:] = 0
-        self.brain.update_glow(self.final["usage"], 10.0)
+        self.brain.glow[:] = 0                         # 脳の光を消しておく（次の「脳と接続中」の画面のため）
 
     # --------------------------------------------------------
     def check_color_register(self):

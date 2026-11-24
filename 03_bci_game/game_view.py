@@ -30,8 +30,7 @@ from OpenGL import GL as gl
 
 import config
 from brain_model import WARNING_TEXT
-from brain_renderer import REGION_COLORS
-from gfx2d import Batch2D, TexturedQuad, rgb255
+from gfx2d import Batch2D, TexturedQuad
 from jtext import JText
 from layout import PH, PW, PX, PY, H, W, pad_to_screen
 from mission import gripper_tip
@@ -53,6 +52,7 @@ MODE_TEXT = {"normal": ("NORMAL", "ノーマル　一人で集める"), "challen
 # タイトル画面の左のルールの説明と、チャレンジのライバルの強さのボタン
 # タイトル画面の中央のルールの説明（脳の表示の代わり）。高さはモードで変わり、上下の真ん中にそろえる
 RULE_AREA = (106, 506)                     # カードを置く上下の範囲（題名の下 〜 カメラ / テストの表示の上）
+RX = W / 2 - 280                           # 結果のカードの左端（幅 560 のカードを中央に）
 INTRO_RECT = (240, 125, 800, 370)                    # 視線同期・手の同期の前の説明のカード（x, y, 幅, 高さ。右下のカメラ映像と重ならない）
 READY_RECT = (100, 96, 1080, 400)                   # 手の同期のあとの「準備 OK」のカード（右下のカメラ映像と重ならない高さ）
 RULE_CARD_W = {"normal": 560, "challenge": 760}   # カードの横幅（チャレンジは強さのボタンを横に並べるので広く）
@@ -77,7 +77,6 @@ STEPS = ["物を約 1 秒見つめる → ロボットが近づく", "手を動�
          "カゴを約 1 秒見つめる → ロボットが運ぶ", "アームをカゴの上へ動かし、手を開いて置く"]
 PHASE_JA = {"ready": "準備：白い輪（あなたの手）をターゲットに重ねる", "reach": "ターゲットを手でゆっくり追う（8 方向）",
             "circle": "ターゲットを手でゆっくり追う（円）", "grip": "合図に合わせて手を握る・開く"}
-REGION_JA = {"motor": "運動野", "somato": "体性感覚野", "fef": "前頭眼野", "visual": "視覚野"}
 
 
 class GameView:
@@ -91,13 +90,11 @@ class GameView:
         self.setup_quad = TexturedQuad(gl.GL_LINEAR)
         self._setup_id = -1
         self.raster_quad = TexturedQuad(gl.GL_NEAREST)
-        self.result_raster = TexturedQuad(gl.GL_NEAREST)
         self.overlay = TexturedQuad(gl.GL_LINEAR)
         self.overlay_img = None                    # 文字の画像（実際の画面の解像度。render で用意する）
         self._last_overlay = -1.0
         self._last_state = None
         self._pip_id = -1
-        self._result_uploaded = None
         self.jtext = JText()
 
     # --------------------------------------------------------
@@ -589,94 +586,54 @@ class GameView:
     # 結果
     # ========================================================
     def _render_result(self, t, dt):
+        """結果：結果とハイスコアのカードを 1 枚、画面の中央に"""
         b = self.batch
         f = self.g.final
         b.rect(0, 0, W, H, (0.03, 0.035, 0.06, 1.0))
-        self._card((30, 30, 560, 640), (1.0, 0.85, 0.35))
-        self._card((610, 30, 640, 640), (1.0, 0.55, 0.2))
+        self._card((RX, 30, 560, 640), (1.0, 0.85, 0.35))
         rank = f["rank"]
         if rank is not None:
-            b.rect(46, 300 + rank * 30 - 4, 528, 28, (0.35, 0.28, 0.08, 0.9))
-        # 領域の使われ方のバー
-        for i, name in enumerate(("motor", "somato", "fef", "visual")):
-            v = f["usage"].get(name, 0.0)
-            x = 640 + (i % 2) * 300
-            y = 352 + (i // 2) * 26
-            b.rect(x + 100, y + 4, 150, 10, (0.15, 0.17, 0.24, 1))
-            b.rect(x + 100, y + 4, 150 * v, 10, (*REGION_COLORS[name], 1))
-        # デコード精度の推移（相関係数）と、劣化・再同期・ライバルを止めた時刻
-        gx, gy, gw, gh = 660, 530, 560, 110
-        b.rect(gx, gy, gw, gh, (0.06, 0.07, 0.11, 1))
-        for v in (0.25, 0.5, 0.75):
-            b.line(gx, gy + gh * (1 - v), gx + gw, gy + gh * (1 - v), 1, (0.18, 0.21, 0.3, 1))
-        rec = f["record"]
-        tmax = max(config.GAME_TIME, 1.0)
-        for tt, what in rec.marks:                    # 劣化の印は、劣化が起きたとき（DEGRADE_ENABLED）だけある
-            x = gx + gw * tt / tmax
-            col = {"degrade": (1.0, 0.3, 0.25, 0.95), "freeze": (0.65, 0.9, 1.0, 0.9)}.get(what, (1.0, 0.45, 0.85, 0.8))
-            b.line(x, gy, x, gy + gh, 2 if what in ("degrade", "freeze") else 1.5, col)
-        pts = [(gx + gw * tt / tmax, gy + gh * (1 - min(max(c, 0), 1))) for tt, c, _ in rec.accuracy if c is not None]
-        for p, q in zip(pts[:-1], pts[1:]):
-            b.line(*p, *q, 2, (0.35, 0.65, 1.0, 1))
+            b.rect(RX + 16, 300 + rank * 30 - 4, 528, 28, (0.35, 0.28, 0.08, 0.9))
         b.flush()
-        self._brain((630, 70, 600, 270), t, dt)
-        if rec.raster is not None:
-            if self._result_uploaded is not rec:
-                self.result_raster.upload(rec.raster)
-                self._result_uploaded = rec
-            self.result_raster.draw(660, 428, 560, 64)
 
     def _text_result(self):
         img = self.overlay_img
+        o = RX - 30                            # 以前の左のカード（x = 30）からのずれ
         f = self.g.final
         r = f["result"]
-        self._label(img, "RESULT", "結果", 50, 46)
+        self._label(img, "RESULT", "結果", 50 + o, 46)
         by = "　".join(f"{v['name']} {r.by_type.get(k, 0)}" for k, v in config.ITEM_TYPES.items())
         rv = f.get("rival")
         if rv is None:
-            self._jt(img, f"{r.score}", f"{r.score}", 300, 74, 66, GOLD, "center", font="display", bold=True)
-            self._jt(img, "PTS", "", 430, 120, 18, GOLD, font="tech", tracking=0.2)
-            self._jt(img, f"集めた数 {r.collected}（{by}）", "collected", 310, 170, 16, INK, "center")
-            self._jt(img, f"最高コンボ ×{r.max_combo:.1f}　　失敗 {r.failures}", "combo", 310, 198, 16, INK, "center")
+            self._jt(img, f"{r.score}", f"{r.score}", 300 + o, 74, 66, GOLD, "center", font="display", bold=True)
+            self._jt(img, "PTS", "", 430 + o, 120, 18, GOLD, font="tech", tracking=0.2)
+            self._jt(img, f"集めた数 {r.collected}（{by}）", "collected", 310 + o, 170, 16, INK, "center")
+            self._jt(img, f"最高コンボ ×{r.max_combo:.1f}　　失敗 {r.failures}", "combo", 310 + o, 198, 16, INK, "center")
         else:                                  # チャレンジ：勝ち負けと両者のスコア、止めた回数
             out_en, out_ja, out_col = {"win": ("YOU WIN", "勝ち", GOLD), "lose": ("YOU LOSE", "負け", RIVAL_RED),
                                        "draw": ("DRAW", "引き分け", INK)}[rv["outcome"]]
-            self._jt(img, out_en, out_ja, 310, 64, 44, out_col, "center", font="display", bold=True, tracking=0.1)
-            self._jt(img, f"{r.score}", "", 220, 122, 28, GOLD, "right", font="display", bold=True)
-            self._jt(img, "VS", "", 310, 128, 16, DIM, "center", font="tech", tracking=0.2)
-            self._jt(img, f"{rv['score']}", "", 400, 122, 28, RIVAL_RED, font="display", bold=True)
+            self._jt(img, out_en, out_ja, 310 + o, 64, 44, out_col, "center", font="display", bold=True, tracking=0.1)
+            self._jt(img, f"{r.score}", "", 220 + o, 122, 28, GOLD, "right", font="display", bold=True)
+            self._jt(img, "VS", "", 310 + o, 128, 16, DIM, "center", font="tech", tracking=0.2)
+            self._jt(img, f"{rv['score']}", "", 400 + o, 122, 28, RIVAL_RED, font="display", bold=True)
             self._jt(img, f"あなた {r.collected} 個　　ライバル（{config.RIVAL_LEVEL_NAMES[rv['level']][1]}）"
-                     f"{rv['collected']} 個", "collected", 310, 170, 15, INK, "center")
+                     f"{rv['collected']} 個", "collected", 310 + o, 170, 15, INK, "center")
             self._jt(img, f"止めた回数 {rv['freezes']}　　取られた {rv['steals']}　　落とされた {rv['knocked']}"
-                     f"　　失敗 {r.failures}", "counts", 310, 198, 15, INK, "center")
+                     f"　　失敗 {r.failures}", "counts", 310 + o, 198, 15, INK, "center")
         rank = f["rank"]
         key = f.get("key", "normal")
         mode_ja = "ノーマル" if key == "normal" else \
             f"チャレンジ・{config.RIVAL_LEVEL_NAMES[key.split('_', 1)[1]][1]}"
         self._label(img, "HIGH SCORES", f"ハイスコア（{mode_ja}）"
-                    + (f"　今回 {rank + 1} 位" if rank is not None else ""), 50, 254, GOLD if rank is not None else ACCENT)
+                    + (f"　今回 {rank + 1} 位" if rank is not None else ""), 50 + o, 254, GOLD if rank is not None else ACCENT)
         for i, sc in enumerate(f["scores"]):
             y = 300 + i * 30
             col = GOLD if i == rank else INK
             sub = col if i == rank else DIM
-            self._jt(img, f"{i + 1:02d}", "", 60, y, 17, sub, font="display")
-            self._jt(img, f"{sc['score']}", "", 250, y, 18, col, "right", font="display")
-            self._jt(img, f"{sc.get('collected', 0)} ITEMS", "", 360, y + 2, 14, sub, "right", font="tech", tracking=0.1)
-            self._jt(img, sc["date"], "", 560, y + 2, 14, sub, "right", font="tech", tracking=0.08)
-        self._label(img, "BRAIN ACTIVITY", "プレイ中の脳の活動", 630, 46, (255, 190, 140))
-        self._jt(img, "光った領域（左半球。明るいほど長く使った）", "regions", 630, 80, 13, DIM)
-        for i, name in enumerate(("motor", "somato", "fef", "visual")):
-            x = 640 + (i % 2) * 300
-            y = 352 + (i // 2) * 26
-            self._jt(img, REGION_JA[name], name, x, y, 14, rgb255(REGION_COLORS[name]))
-            self._jt(img, f"{f['usage'].get(name, 0.0) * 100:3.0f}%", "", x + 290, y, 14, DIM, "right", font="tech")
-        self._label(img, "SPIKES", "最後に物をつかんだ直前の 4 秒（上の白い行 = 把持ニューロン）", 660, 404, DIM, 13)
-        kinds = {w for _, w in f["record"].marks}
-        legend = "相関係数の推移" + ("　赤 = 電極劣化" if "degrade" in kinds else "") \
-            + ("　水色 = ライバルを止めた" if f.get("rival") else "") + "　ピンク = 再同期"
-        self._label(img, "DECODING ACCURACY", legend, 660, 504, DIM, 13)
-        self._jt(img, "0 S", "0", 660, 646, 13, DIM, font="tech", tracking=0.1)
-        self._jt(img, f"{config.GAME_TIME:.0f} S", "", 1220, 646, 13, DIM, "right", font="tech", tracking=0.1)
+            self._jt(img, f"{i + 1:02d}", "", 60 + o, y, 17, sub, font="display")
+            self._jt(img, f"{sc['score']}", "", 250 + o, y, 18, col, "right", font="display")
+            self._jt(img, f"{sc.get('collected', 0)} ITEMS", "", 360 + o, y + 2, 14, sub, "right", font="tech", tracking=0.1)
+            self._jt(img, sc["date"], "", 560 + o, y + 2, 14, sub, "right", font="tech", tracking=0.08)
         self._jt(img, "SPACE  ―  RETURN TO TITLE", "SPACE: title", W / 2, 684, 16, INK, "center", font="tech",
                  tracking=0.2)
 

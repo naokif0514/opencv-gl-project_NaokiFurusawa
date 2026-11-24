@@ -206,7 +206,6 @@ DEGRADE_SHAKE_SEC = 1.2       # 劣化したときにカメラ（視点）が揺
 
 GRAB_MARGIN = 0.03            # グリッパーの先が物の半径 + この距離以内なら、つかめる
 SCAN_RADIUS = 0.08            # （未使用の互換用）
-ACCURACY_LOG_SEC = 1.0        # デコード精度の推移を記録する間隔 [秒]
 HIGHSCORE_FILE = "saves/highscores.json"
 HIGHSCORE_OLD_CHALLENGE_FILE = "saves/highscores_old_challenge.json"   # 以前の「劣化あり」のチャレンジの記録
 HIGHSCORE_OLD_DISTANCE_FILE = "saves/highscores_old_distance.json"     # 距離の倍率があった頃（得点のルールが違う）の記録
