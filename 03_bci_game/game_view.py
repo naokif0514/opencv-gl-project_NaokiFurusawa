@@ -51,15 +51,18 @@ START_BUTTON = (W / 2 - 170, 604, 340, 56)
 MODE_BUTTONS = {"normal": (W / 2 - 215, 550, 210, 46), "challenge": (W / 2 + 5, 550, 210, 46)}
 MODE_TEXT = {"normal": ("NORMAL", "ノーマル　一人で集める"), "challenge": ("CHALLENGE", "チャレンジ　ライバルと対戦")}
 # タイトル画面の左のルールの説明と、チャレンジのライバルの強さのボタン
-RULE_CARD = (28, 150, 262, 380)
-LEVEL_BUTTONS = {"weak": (44, 404, 230, 34), "normal": (44, 442, 230, 34), "strong": (44, 480, 230, 34)}
+# タイトル画面の中央のルールの説明（脳の表示の代わり）。高さはモードで変わり、上下の真ん中にそろえる
+RULE_AREA = (106, 506)                     # カードを置く上下の範囲（題名の下 〜 カメラ / テストの表示の上）
+RULE_CARD_W = {"normal": 560, "challenge": 760}   # カードの横幅（チャレンジは強さのボタンを横に並べるので広く）
+RULE_LINE_H = 26                           # ルールの 1 行の高さ
 RULES = {
     "normal": ["120 秒で、物をできるだけ多くカゴへ", "小さい物ほど高得点（箱 < 缶 < 玉 < 星）",
                "続けて成功するとコンボで点が増える"],
-    "challenge": ["120 秒で、ライバル（赤）より", "多く点を取れば勝ち",
-                  "ライバルも擬似 BCI で動く", "（たまにつかみ損ねる）",
-                  "ライバルを約 1.5 秒見つめると止まる", "狙った物を横取りしにくる",
-                  "運んでいるときにぶつかられると", "落とすことがある"],
+    "challenge": ["120 秒で、ライバル（赤）より多く点を取れば勝ち",
+                  "ライバルも擬似 BCI で動く（たまにつかみ損ねる）",
+                  "ライバルを約 1.5 秒見つめると、少しのあいだ止まる",
+                  "あなたが狙った物を横取りしにくる",
+                  "運んでいるときにぶつかられると、落とすことがある"],
 }
 RIVAL_RED = (255, 120, 95)
 # カメラ調整の画面
@@ -102,11 +105,27 @@ class GameView:
         x, y, w, h = self.rt.letterbox(ww, wh)
         return np.array([(mx - x) / max(w, 1) * W, (my - y) / max(h, 1) * H])
 
+    def _rule_card(self):
+        """ルールのカードの位置 (x, y, 幅, 高さ)：中央に置き、モードで高さを変えて上下の真ん中にそろえる"""
+        mode = self.g.mode
+        h = 54 + len(RULES[mode]) * RULE_LINE_H + (96 if mode == "challenge" else 6)
+        top, bottom = RULE_AREA
+        w = RULE_CARD_W[mode]
+        return (W / 2 - w / 2, top + (bottom - top - h) / 2, w, h)
+
+    def _level_buttons(self):
+        """ライバルの強さのボタン（ルールのカードの下のほう）"""
+        x, y, w, h = self._rule_card()
+        y0 = y + 54 + len(RULES["challenge"]) * RULE_LINE_H + 34
+        bw, gap = 210, 16                      # 3 つを横に並べる
+        x0 = W / 2 - (3 * bw + 2 * gap) / 2
+        return {lv: (x0 + i * (bw + gap), y0, bw, 40) for i, lv in enumerate(("weak", "normal", "strong"))}
+
     def level_button_hit(self, p):
         """タイトル画面のライバルの強さのボタンの上なら、その強さ（チャレンジを選んでいるときだけ）"""
         if self.g.mode != "challenge":
             return None
-        for lv, (x, y, w, h) in LEVEL_BUTTONS.items():
+        for lv, (x, y, w, h) in self._level_buttons().items():
             if x <= p[0] <= x + w and y <= p[1] <= y + h:
                 return lv
         return None
@@ -263,9 +282,9 @@ class GameView:
                 b.rect(x, y, w, h, (*[c * (0.35 if on else 0.08) for c in acc], 0.9))
                 for yy in (y, y + h - 2):
                     b.rect(x, yy, w, 2, (*acc, 1.0 if on else 0.3))
-            self._card(RULE_CARD, (1.0, 0.45, 0.3) if self.g.mode == "challenge" else (0.4, 0.9, 0.6), 0.85)
+            self._card(self._rule_card(), (1.0, 0.45, 0.3) if self.g.mode == "challenge" else (0.4, 0.9, 0.6), 0.85)
             if self.g.mode == "challenge":                        # ライバルの強さ
-                for lv, (x, y, w, h) in LEVEL_BUTTONS.items():
+                for lv, (x, y, w, h) in self._level_buttons().items():
                     on = lv == self.g.rival_level
                     b.rect(x, y, w, h, (0.85, 0.25, 0.2, 0.55) if on else (0.2, 0.08, 0.08, 0.6))
                     b.rect(x, y, 3, h, (1.0, 0.5, 0.35, 1.0 if on else 0.3))
@@ -274,16 +293,14 @@ class GameView:
             b.rect(W / 2 - 200, 610, 400, 8, (0.15, 0.2, 0.3, 1))
             b.rect(W / 2 - 200, 610, 400 * k, 8, (0.5, 0.85, 1.0, 1))
         b.flush()
-        self._brain(TITLE_BRAIN, t, dt)
+        if self.g.state != "title":            # 脳は「脳と接続中」の画面だけ（タイトルでは中央にルールを出す）
+            self._brain(TITLE_BRAIN, t, dt)
 
     def _text_title(self):
         img = self.overlay_img
         g = self.g
         self._jt(img, "BCI OPERATOR", "BCI OPERATOR", W / 2, 20, 52, (225, 240, 255), "center", font="display",
                  bold=True, tracking=0.12)
-        self._jt(img, "BRAIN-COMPUTER INTERFACE  //  HYBRID CONTROL", "", W / 2, 86, 16, ACCENT, "center", font="tech",
-                 tracking=0.25)
-        self._jt(img, "視線と脳の信号でロボットを操作し、物を集める", "", W / 2, 110, 15, DIM, "center")
         if g.state == "title":
             self._jt(img, "START", "START", W / 2, START_BUTTON[1] + 4, 26, (255, 255, 255), "center", font="display",
                      bold=True, tracking=0.3)
@@ -294,21 +311,26 @@ class GameView:
                 self._jt(img, ("▶ " if on else "") + en, en, x + w / 2, y + 5, 16, col, "center", font="tech", bold=True,
                          tracking=0.2)
                 self._jt(img, ja, en, x + w / 2, y + 25, 12, col, "center")
-            # ルールの説明（左のカード）と、チャレンジならライバルの強さ
+            # ルールの説明（中央のカード）と、チャレンジならライバルの強さ
             mode = g.mode
-            x0, y0 = RULE_CARD[0] + 16, RULE_CARD[1] + 14
-            self._label(img, "RULES", "ルール", x0, y0, (255, 170, 140) if mode == "challenge" else GOOD, 14)
+            cx_, cy_, cw_, ch_ = self._rule_card()
+            y0 = cy_ + 14
+            col = (255, 170, 140) if mode == "challenge" else GOOD
+            self._jt(img, "RULES", "RULES", W / 2 - 6, y0, 15, col, "right", font="tech", bold=True, tracking=0.22)
+            self._jt(img, "ルール", "", W / 2 + 6, y0 + 1, 13, DIM)
             for i, line in enumerate(RULES[mode]):
-                self._jt(img, line, "rule", x0, y0 + 32 + i * 22, 13, INK if not line.startswith("（") else DIM)
+                self._jt(img, line, "rule", W / 2, y0 + 38 + i * RULE_LINE_H, 15,
+                         INK if not line.startswith("（") else DIM, "center")
             if mode == "challenge":
-                self._jt(img, "RIVAL LEVEL  ―  1 / 2 / 3", "", x0, LEVEL_BUTTONS["weak"][1] - 26, 12, DIM,
+                lvb = self._level_buttons()
+                self._jt(img, "RIVAL LEVEL  ―  1 / 2 / 3", "", W / 2, lvb["weak"][1] - 22, 12, DIM, "center",
                          font="tech", tracking=0.15)
-                for lv, (x, y, w, h) in LEVEL_BUTTONS.items():
+                for lv, (x, y, w, h) in lvb.items():
                     on = lv == g.rival_level
                     en, ja = config.RIVAL_LEVEL_NAMES[lv]
-                    self._jt(img, ("▶ " if on else "") + en, en, x + 14, y + 7, 15, (255, 255, 255) if on else DIM,
+                    self._jt(img, ("▶ " if on else "") + en, en, x + 14, y + 10, 15, (255, 255, 255) if on else DIM,
                              font="tech", bold=True, tracking=0.2)
-                    self._jt(img, ja, en, x + w - 12, y + 9, 13, (255, 255, 255) if on else DIM, "right")
+                    self._jt(img, ja, en, x + w - 12, y + 12, 13, (255, 255, 255) if on else DIM, "right")
             self._jt(img, "SPACE / CLICK", "", W / 2, START_BUTTON[1] + 33, 13, ACCENT, "center", font="tech",
                      tracking=0.3)
             if g.test_mode:
@@ -317,9 +339,6 @@ class GameView:
             else:
                 self._jt(img, "CAMERA MODE  ―  顔と右手をカメラに映す", "", W / 2, 522, 15, GOOD, "center", font="tech",
                          tracking=0.08)
-            keys = ("M / ← →  MODE     1 / 2 / 3  RIVAL     T  CAMERA / TEST     F11  FULLSCREEN     ESC  QUIT"
-                    if g.vision is not None else "M / ← →  MODE     1 / 2 / 3  RIVAL     F11  FULLSCREEN     ESC  QUIT")
-            self._jt(img, keys, keys, W / 2, 674, 13, DIM, "center", font="tech", tracking=0.2)
         else:
             self._jt(img, "LINKING TO CORTEX", "", W / 2, 556, 26, ACCENT, "center", font="display", tracking=0.18)
             self._jt(img, "脳と接続中", "", W / 2, 586, 15, DIM, "center")
