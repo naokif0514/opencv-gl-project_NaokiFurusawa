@@ -313,16 +313,6 @@ class Scene3D:
         m = 0.07
         self.draw(self.meshes.cube, translate(0, -0.03, 0) @ scale(config.WORLD_W / 2 + m, 0.03, config.WORLD_H / 2 + m),
                   I, config.TABLE_COLOR_HQ if self.full else config.TABLE_COLOR, spec=0.08, material="wood", wood=True)
-        # 机の上の薄い格子（距離感をつかみやすくする。新しいシェーダーでは木目を邪魔しないよう暗い細い線）
-        col = tuple(c * 0.70 for c in config.TABLE_COLOR_HQ) if self.full else \
-            tuple(min(1.0, c * 1.25) for c in config.TABLE_COLOR)
-        gw = 0.0009 if self.full else 0.0015      # 線の太さの半分
-        for k in range(1, 8):
-            x = -config.WORLD_W / 2 + config.WORLD_W * k / 8
-            self.draw(self.meshes.cube, translate(x, 0.0003, 0) @ scale(gw, 0.0003, config.WORLD_H / 2), I, col)
-        for k in range(1, 6):
-            z = -config.WORLD_H / 2 + config.WORLD_H * k / 6
-            self.draw(self.meshes.cube, translate(0, 0.0003, z) @ scale(config.WORLD_W / 2, 0.0003, gw), I, col)
         # 床（机の下、遠くまで）
         self.draw(self.meshes.cube, translate(0, -0.75, 0) @ scale(4.0, 0.01, 4.0), I,
                   config.SCENE_FLOOR if self.full else (0.10, 0.11, 0.15))
