@@ -10,7 +10,7 @@ mission.py
   一度に運べるのは 1 個。何もないところで握る（つかみ損ね）・カゴの外で放す（床に落ちて残る）と失敗。
 
 ■ 得点
-  基本点（物の種類。小さい物ほど高い）× 距離の倍率（つかんだ位置がカゴから遠いほど高い、DISTANCE_BONUS）
+  基本点（物の種類。小さい物ほど高い。距離では変えない）
   × コンボの倍率（COMBO_LEVELS。成功で 1 段階上がり、失敗で 1 段階だけ下がる）
 
 ■ 電極劣化イベント
@@ -98,12 +98,8 @@ class GameResult:
 
 
 def item_points(item, goal, combo_mult):
-    """物をカゴに入れたときの点数：基本点 × 距離の倍率（つかんだ位置がそのカゴから遠いほど高い）× コンボの倍率"""
-    d = float(np.linalg.norm(item.pickup_pos - np.asarray(goal)))
-    dmax = float(np.hypot(config.WORLD_W, config.WORLD_H))
-    lo, hi = config.DISTANCE_BONUS
-    dist_mult = lo + (hi - lo) * min(1.0, d / (0.8 * dmax))
-    return int(round(item.spec["points"] * dist_mult * combo_mult)), dist_mult
+    """物をカゴに入れたときの点数：物の種類の基本点 × コンボの倍率（つかんだ位置の距離では変えない）。goal は使わない（以前の名残）"""
+    return int(round(item.spec["points"] * combo_mult))
 
 
 class Mission:
@@ -174,7 +170,7 @@ class Mission:
         return best
 
     def points_for(self, item):
-        """この物をカゴに入れたときの点数：基本点 × 距離の倍率 × コンボの倍率"""
+        """この物をカゴに入れたときの点数：基本点 × コンボの倍率"""
         return item_points(item, config.GOAL_POS, self.combo_mult)
 
     def knock_off(self, tip):
@@ -201,12 +197,12 @@ class Mission:
         self.held = None
         d = float(np.linalg.norm(tip - np.asarray(config.GOAL_POS)))
         if d <= config.GOAL_RADIUS:
-            pts, dist_mult = self.points_for(it)
+            pts = self.points_for(it)
             self.result.score += pts
             self.result.collected += 1
             self.result.by_type[it.type] = self.result.by_type.get(it.type, 0) + 1
             self.last_score_delta = pts
-            self.log(f"deliver_ok:{it.type}:+{pts}:dist_x{dist_mult:.2f}:combo_x{self.combo_mult:.1f}")
+            self.log(f"deliver_ok:{it.type}:+{pts}:combo_x{self.combo_mult:.1f}")
             self.combo = min(len(config.COMBO_LEVELS) - 1, self.combo + 1)
             self.result.max_combo = max(self.result.max_combo, self.combo_mult)
             return ("deliver", it, pts)

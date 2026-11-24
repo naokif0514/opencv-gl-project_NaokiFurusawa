@@ -54,7 +54,7 @@ MODE_TEXT = {"normal": ("NORMAL", "ノーマル　一人で集める"), "challen
 RULE_CARD = (28, 150, 262, 380)
 LEVEL_BUTTONS = {"weak": (44, 404, 230, 34), "normal": (44, 442, 230, 34), "strong": (44, 480, 230, 34)}
 RULES = {
-    "normal": ["120 秒で、物をできるだけ多くカゴへ", "小さい物・遠い物ほど高得点",
+    "normal": ["120 秒で、物をできるだけ多くカゴへ", "小さい物ほど高得点（箱 < 缶 < 玉 < 星）",
                "続けて成功するとコンボで点が増える"],
     "challenge": ["120 秒で、ライバル（赤）より", "多く点を取れば勝ち",
                   "ライバルも擬似 BCI で動く", "（たまにつかみ損ねる）",
@@ -763,7 +763,7 @@ class GameView:
                 self._label(img, "HOW TO PLAY", "遊び方", 56, 162)
                 for i, s in enumerate(STEPS):
                     self._jt(img, f"{i + 1}. {s}", s, 56, 196 + i * 40, 13, INK)
-                self._jt(img, f"制限時間 {config.GAME_TIME:.0f} 秒。小さい物・遠い物ほど高得点", "", 56, 360, 12, GOLD)
+                self._jt(img, f"制限時間 {config.GAME_TIME:.0f} 秒。小さい物ほど高得点（箱 100・缶 150・玉 250・星 500）", "", 56, 360, 12, GOLD)
         if g.state == "countdown":
             n = int(math.ceil(config.COUNTDOWN_SEC - g.state_t))
             self._jt(img, str(n) if n > 0 else "GO", "GO", cx, H / 2 - 74, 110, (255, 255, 255), "center",

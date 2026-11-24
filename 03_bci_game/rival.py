@@ -15,7 +15,7 @@ rival.py
 ■ 行動（状態）
   think（次に狙う物を決める）→ go（台座を物の手前へ）→ reach（アームを物へ）→ grip（握る）
   → carry（自分のカゴへ）→ place（カゴの上で放す）→ think …
-  ・狙う物：点数 × 自分のカゴからの距離の倍率 ÷（今の場所から物まで + 物からカゴまでの距離）が大きい物。
+  ・狙う物：点数（物の種類 × 自分のコンボ）÷（今の場所から物まで + 物からカゴまでの距離）が大きい物。
     プレイヤーのロボットのすぐそばの物は避ける
   ・横取り：プレイヤーがロックオンした物を、強さに応じた確率（steal）で狙いにいく
   ・つかまれている物は取れない。カゴから物を盗むことはしない
@@ -147,7 +147,7 @@ class Rival:
     # --------------------------------------------------------
     def _value(self, it, player):
         """狙う価値：点数 ÷ かかる距離。プレイヤーのロボットのすぐそばの物は避ける"""
-        pts, _ = item_points(SimpleNamespace(pickup_pos=it.pos, spec=it.spec), self.goal_pos, self.combo_mult)
+        pts = item_points(SimpleNamespace(pickup_pos=it.pos, spec=it.spec), self.goal_pos, self.combo_mult)
         dist = np.linalg.norm(it.pos - self.robot.pos) + np.linalg.norm(it.pos - self.goal_pos) + 0.2
         if np.linalg.norm(it.pos - player.pos) < 0.13:
             pts *= 0.2
@@ -373,7 +373,7 @@ class Rival:
         it.height = 0.08
         self.held = None
         if np.linalg.norm(tip - self.goal_pos) <= config.GOAL_RADIUS:
-            pts, _ = item_points(it, self.goal_pos, self.combo_mult)
+            pts = item_points(it, self.goal_pos, self.combo_mult)
             self.score += pts
             self.collected += 1
             self.combo = min(len(config.COMBO_LEVELS) - 1, self.combo + 1)
