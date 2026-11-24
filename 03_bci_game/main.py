@@ -117,6 +117,7 @@ class Game:
         self.recalibrating = False
         self.resume_play = False
         self.gaze_intro = False          # 視線同期の前の説明の画面を出している間 True
+        self.hand_intro = False          # 手の同期の前の説明の画面を出している間 True
         self.selected = None
         self.lock_time = -1e9          # 最後に行き先を決めた時刻（time.monotonic）
         self.last_gaze = None          # 直前の注視点（まばたき中に使う。ログにも使う）
@@ -192,7 +193,9 @@ class Game:
             self.gaze.calib.cancel()
             self.dwell.reset()
         elif s == "hand_calib":
-            self.hand_calib.start()
+            # まず説明の画面（ターゲットはまだ動かない）。SPACE / ENTER / クリックで同期が始まる
+            self.hand_intro = True
+            self.hand_calib.cancel()
         elif s == "play":
             self.mission = Mission(self.rng, degrade=config.DEGRADE_ENABLED)
             self.events.append(f"mode:{self.score_key}")
@@ -294,6 +297,8 @@ class Game:
             self.set_mode("challenge")
         elif key == glfw.KEY_T and self.vision is not None and self.state == "title":
             self.test_mode = not self.test_mode
+        elif self.state == "hand_calib" and self.hand_intro and go:
+            self.start_hand_sync()
         elif self.state == "ready" and go:
             self.set_state("countdown")
         elif self.state == "gaze_calib" and self.gaze_intro and go:
@@ -356,6 +361,8 @@ class Game:
                     self.set_rival_level(level)
                 elif self.view.start_button_hit(p):
                     self.start_game()
+            elif action == glfw.PRESS and self.state == "hand_calib" and self.hand_intro:
+                self.start_hand_sync()
             elif action == glfw.PRESS and self.state == "ready":
                 self.set_state("countdown")
             elif action == glfw.PRESS and self.state == "gaze_calib" and self.gaze_intro:
@@ -482,6 +489,12 @@ class Game:
         elif s == "play":
             return self.update_play(dt, gaze, blobs, now)
         return 0.0
+
+    def start_hand_sync(self):
+        """説明の画面を閉じて、手の同期（ターゲットを追う）を始める"""
+        self.hand_intro = False
+        self.hand_calib.start()
+        self.events.append("hand_intro_done")
 
     def start_gaze_points(self):
         """説明の画面を閉じて、視線同期の点を出しはじめる"""

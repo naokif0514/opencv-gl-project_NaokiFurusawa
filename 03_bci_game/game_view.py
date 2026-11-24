@@ -53,7 +53,7 @@ MODE_TEXT = {"normal": ("NORMAL", "ノーマル　一人で集める"), "challen
 # タイトル画面の左のルールの説明と、チャレンジのライバルの強さのボタン
 # タイトル画面の中央のルールの説明（脳の表示の代わり）。高さはモードで変わり、上下の真ん中にそろえる
 RULE_AREA = (106, 506)                     # カードを置く上下の範囲（題名の下 〜 カメラ / テストの表示の上）
-GAZE_INTRO_RECT = (240, 140, 800, 400)               # 視線同期の前の説明のカード（x, y, 幅, 高さ）
+INTRO_RECT = (240, 110, 800, 400)                    # 視線同期・手の同期の前の説明のカード（x, y, 幅, 高さ。右下のカメラ映像と重ならない）
 READY_RECT = (100, 96, 1080, 400)                   # 手の同期のあとの「準備 OK」のカード（右下のカメラ映像と重ならない高さ）
 RULE_CARD_W = {"normal": 560, "challenge": 760}   # カードの横幅（チャレンジは強さのボタンを横に並べるので広く）
 RULE_LINE_H = 26                           # ルールの 1 行の高さ
@@ -396,6 +396,9 @@ class GameView:
                 b.ring(*gaze, 11, 1.5, (1.0, 0.8, 0.3, 0.9), 20)
         if g.hand_calib.active:
             self._draw_hand_calib()
+        elif g.state == "hand_calib" and g.hand_intro:     # 手の同期の前の説明の画面
+            b.rect(0, HUD, W, H - HUD, (0.03, 0.0, 0.05, 0.72))
+            self._card(INTRO_RECT, (1.0, 0.3, 0.85), 0.95)
         if g.state == "ready":
             b.rect(0, HUD, W, H - HUD, (0.0, 0.01, 0.03, 0.6))
             x, y, w, h = READY_RECT
@@ -404,9 +407,10 @@ class GameView:
         if g.state == "countdown":
             b.rect(0, 0, W, H, (0.0, 0.01, 0.03, 0.45))
 
-        # ---- HUD の帯 ----
-        b.rect(0, 0, W, HUD, (0.03, 0.04, 0.07, 0.86))
-        b.rect(0, HUD, W, 2, (0.3, 0.45, 0.65, 0.9))
+        # ---- HUD の帯（手の同期の間は出さない。プレイ中の再同期では出す）----
+        if g.state != "hand_calib":
+            b.rect(0, 0, W, HUD, (0.03, 0.04, 0.07, 0.86))
+            b.rect(0, HUD, W, 2, (0.3, 0.45, 0.65, 0.9))
         if m is not None and g.state != "gaze_calib":
             frac = m.time_left / config.GAME_TIME
             col = (1.0, 0.35, 0.3) if m.time_left < 20 else (0.4, 0.85, 1.0)
@@ -467,7 +471,7 @@ class GameView:
         b = self.batch
         b.rect(0, HUD, W, H - HUD, (0.0, 0.02, 0.05, 0.7))
         if self.g.gaze_intro:                  # 点を出す前の説明の画面
-            self._card(GAZE_INTRO_RECT, (0.4, 0.9, 1.0), 0.95)
+            self._card(INTRO_RECT, (0.4, 0.9, 1.0), 0.95)
             return
         cal = self.g.gaze.calib
         check = cal.phase == "check"
@@ -741,15 +745,37 @@ class GameView:
             self._jt(img, s, s, rx, ty + 38 + i * 30, 14, INK)
         self._jt(img, "SPACE / ENTER / クリックでスタート", "SPACE / ENTER", cx, y + h - 46, 18, GOLD, "center", bold=True)
 
+    def _text_intro(self, img, en, title, lines, note, warn, color):
+        """同期の前の説明のカード（視線同期・手の同期で共通）：見出し・手順・注意・警告・始め方"""
+        x, y, w, h = INTRO_RECT
+        cx = x + w / 2
+        self._jt(img, en, en, cx, y + 22, 30, color, "center", font="display", bold=True, tracking=0.2)
+        self._jt(img, title, "", cx, y + 64, 19, INK, "center", bold=True)
+        for i, s in enumerate(lines):
+            self._jt(img, s, s, x + 56, y + 118 + i * 34, 15, INK)
+        self._jt(img, note, "", cx, y + h - 96, 13, DIM, "center")
+        if warn:
+            self._jt(img, warn, "warn", cx, y + h - 70, 15, BAD, "center")
+        self._jt(img, "SPACE / ENTER / クリックで始める", "SPACE / ENTER", cx, y + h - 42, 18, GOLD, "center",
+                 bold=True)
+
+    def _text_hand_intro(self, img, g):
+        """手の同期の前の説明の画面（ターゲットはまだ動いていない）"""
+        hand = g.vision.get_state().hand.detected if g.vision else True
+        self._text_intro(img, "HAND SYNC", f"手の動きを合わせます（約 {g.hand_calib.duration:.0f} 秒）", [
+            "1.  右手をカメラに映してください。画面の白い輪が、あなたの手です。",
+            "2.  マゼンタのターゲットに白い輪を重ねて、ゆっくり追いかけてください。",
+            "3.  ターゲットは 8 方向に行き来したあと、円をえがいて動きます。",
+            "4.  最後は「GRIP（握る）」「OPEN（開く）」の合図に合わせて、",
+            "      手を握る・開くをくり返してください。",
+        ], "同期中は、今やることだけをパッドの下に出します。",
+            None if hand else "手が見つかりません：右手をカメラに映してください", MAGENTA)
+
     def _text_gaze_intro(self, img, g):
         """視線同期の前の説明の画面（点はまだ出ていない）"""
-        x, y, w, h = GAZE_INTRO_RECT
-        cx = x + w / 2
         n = config.GAZE_CALIB_POINTS
         sec = n * (config.GAZE_CALIB_SETTLE + config.GAZE_CALIB_COLLECT) + \
             len(g.gaze.calib.check_points) * (config.GAZE_CHECK_SETTLE + config.GAZE_CHECK_COLLECT)
-        self._jt(img, "GAZE SYNC", "GAZE SYNC", cx, y + 22, 30, ACCENT, "center", font="display", bold=True, tracking=0.2)
-        self._jt(img, f"視線を合わせます（約 {sec:.0f} 秒）", "", cx, y + 64, 19, INK, "center", bold=True)
         lines = [
             f"1.  画面に光る点が 1 つずつ、{n} か所に出ます。出た点を見てください。",
             "2.  ゲーム中と同じ姿勢で、いつもどおり自然に見てください。",
@@ -757,14 +783,9 @@ class GameView:
             "4.  最後に金色の点が出ます。同じように見つめると、ずれを確かめます。",
             "      ずれが大きいときは、もう一度やり直します。",
         ]
-        for i, s in enumerate(lines):
-            self._jt(img, s, s, x + 56, y + 118 + i * 34, 15, INK)
-        self._jt(img, "点が出ている間は、説明は出ません。", "", cx, y + h - 96, 13, DIM, "center")
         face = g.vision.get_state().face_detected if g.vision else False
-        if not face:
-            self._jt(img, "顔が見つかりません：カメラの正面へ", "no face", cx, y + h - 70, 15, BAD, "center")
-        self._jt(img, "SPACE / ENTER / クリックで始める", "SPACE / ENTER", cx, y + h - 42, 18, GOLD, "center",
-                 bold=True)
+        self._text_intro(img, "GAZE SYNC", f"視線を合わせます（約 {sec:.0f} 秒）", lines,
+                         "点が出ている間は、説明は出ません。", None if face else "顔が見つかりません：カメラの正面へ", ACCENT)
 
     def _text_game(self, fps):
         img = self.overlay_img
@@ -772,7 +793,7 @@ class GameView:
         m = g.mission
 
         rv = g.rival
-        if g.state != "gaze_calib":            # 視線同期の間は、HUD の帯に説明を出すので、数字は出さない
+        if g.state not in ("gaze_calib", "hand_calib"):   # 視線同期・手の同期の間は、スコアなどの数字は出さない
             self._text_hud(img, g, m)
 
         # ---- 視線の合わせ直しの案内（カメラモードのプレイ中、HUD の下に小さく）----
@@ -800,6 +821,8 @@ class GameView:
         cx = W / 2
         if g.state == "gaze_calib" and g.gaze_intro:
             self._text_gaze_intro(img, g)
+        elif g.state == "hand_calib" and g.hand_intro:
+            self._text_hand_intro(img, g)
         elif g.state == "gaze_calib":
             cal = g.gaze.calib
             # 何をしているかの説明（画面の上の中央。四隅の点・確認の点と重ならない高さ）
