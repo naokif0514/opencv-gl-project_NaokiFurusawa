@@ -116,6 +116,7 @@ class Game:
         self.final = None                # 結果画面に出すもの
         self.recalibrating = False
         self.resume_play = False
+        self.gaze_intro = False          # 視線同期の前の説明の画面を出している間 True
         self.selected = None
         self.lock_time = -1e9          # 最後に行き先を決めた時刻（time.monotonic）
         self.last_gaze = None          # 直前の注視点（まばたき中に使う。ログにも使う）
@@ -185,8 +186,10 @@ class Game:
         elif s == "connect":
             self.brain.set_surface("infl")
         elif s == "gaze_calib":
+            # まず説明の画面（点はまだ出さない）。SPACE / ENTER / クリックで点が出はじめる（点が出ている間は説明を読めないので）
+            self.gaze_intro = True
             self.gaze.calib.reset_tries()
-            self.gaze.calib.start()
+            self.gaze.calib.cancel()
             self.dwell.reset()
         elif s == "hand_calib":
             self.hand_calib.start()
@@ -291,6 +294,8 @@ class Game:
             self.set_mode("challenge")
         elif key == glfw.KEY_T and self.vision is not None and self.state == "title":
             self.test_mode = not self.test_mode
+        elif self.state == "gaze_calib" and self.gaze_intro and go:
+            self.start_gaze_points()
         elif self.state == "gaze_calib" and key == glfw.KEY_ENTER and self.gaze.calib.can_skip:
             self.finish_gaze_calib(best=True)
         elif self.state == "title" and go:
@@ -349,6 +354,8 @@ class Game:
                     self.set_rival_level(level)
                 elif self.view.start_button_hit(p):
                     self.start_game()
+            elif action == glfw.PRESS and self.state == "gaze_calib" and self.gaze_intro:
+                self.start_gaze_points()
 
     def mouse_layout(self):
         """マウスの位置（論理座標 1280×720。拡大と黒い帯を戻したもの）"""
@@ -452,6 +459,8 @@ class Game:
             if self.test_mode:
                 self.gaze.calib.cancel()
                 self.after_gaze_calib()
+            elif self.gaze_intro:
+                pass                                     # 説明の画面：SPACE / ENTER / クリックを待つ
             elif self.gaze.calib.step(feat, dt):
                 cal = self.gaze.calib
                 if cal.passed:
@@ -469,6 +478,12 @@ class Game:
         elif s == "play":
             return self.update_play(dt, gaze, blobs, now)
         return 0.0
+
+    def start_gaze_points(self):
+        """説明の画面を閉じて、視線同期の点を出しはじめる"""
+        self.gaze_intro = False
+        self.gaze.calib.start()
+        self.events.append("gaze_intro_done")
 
     def finish_gaze_calib(self, best=False):
         """視線同期の終わり（best = True なら、やり直したなかで一番よかった結果を使う）"""

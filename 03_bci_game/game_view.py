@@ -53,6 +53,7 @@ MODE_TEXT = {"normal": ("NORMAL", "ノーマル　一人で集める"), "challen
 # タイトル画面の左のルールの説明と、チャレンジのライバルの強さのボタン
 # タイトル画面の中央のルールの説明（脳の表示の代わり）。高さはモードで変わり、上下の真ん中にそろえる
 RULE_AREA = (106, 506)                     # カードを置く上下の範囲（題名の下 〜 カメラ / テストの表示の上）
+GAZE_INTRO_RECT = (240, 140, 800, 400)               # 視線同期の前の説明のカード（x, y, 幅, 高さ）
 RULE_CARD_W = {"normal": 560, "challenge": 760}   # カードの横幅（チャレンジは強さのボタンを横に並べるので広く）
 RULE_LINE_H = 26                           # ルールの 1 行の高さ
 RULES = {
@@ -459,6 +460,9 @@ class GameView:
         """視線同期：学習の点（水色）→ 確認の点（金色）。終わった点は小さな点で残す"""
         b = self.batch
         b.rect(0, HUD, W, H - HUD, (0.0, 0.02, 0.05, 0.7))
+        if self.g.gaze_intro:                  # 点を出す前の説明の画面
+            self._card(GAZE_INTRO_RECT, (0.4, 0.9, 1.0), 0.95)
+            return
         cal = self.g.gaze.calib
         check = cal.phase == "check"
         col = (1.0, 0.8, 0.3) if check else (0.4, 0.9, 1.0)
@@ -710,6 +714,31 @@ class GameView:
             jx = x + w + 10 if anchor == "left" else x + 10
             self._jt(img, ja, "", jx, y + 1, max(13, size - 2), DIM)
 
+    def _text_gaze_intro(self, img, g):
+        """視線同期の前の説明の画面（点はまだ出ていない）"""
+        x, y, w, h = GAZE_INTRO_RECT
+        cx = x + w / 2
+        n = config.GAZE_CALIB_POINTS
+        sec = n * (config.GAZE_CALIB_SETTLE + config.GAZE_CALIB_COLLECT) + \
+            len(g.gaze.calib.check_points) * (config.GAZE_CHECK_SETTLE + config.GAZE_CHECK_COLLECT)
+        self._jt(img, "GAZE SYNC", "GAZE SYNC", cx, y + 22, 30, ACCENT, "center", font="display", bold=True, tracking=0.2)
+        self._jt(img, f"視線を合わせます（約 {sec:.0f} 秒）", "", cx, y + 64, 19, INK, "center", bold=True)
+        lines = [
+            f"1.  画面に光る点が 1 つずつ、{n} か所に出ます。出た点を見てください。",
+            "2.  ゲーム中と同じ姿勢で、いつもどおり自然に見てください。",
+            "3.  点のまわりの輪が一周するまで見つめていると、次の点へ移ります。",
+            "4.  最後に金色の点が出ます。同じように見つめると、ずれを確かめます。",
+            "      ずれが大きいときは、もう一度やり直します。",
+        ]
+        for i, s in enumerate(lines):
+            self._jt(img, s, s, x + 56, y + 118 + i * 34, 15, INK)
+        self._jt(img, "点が出ている間は、説明は出ません。", "", cx, y + h - 96, 13, DIM, "center")
+        face = g.vision.get_state().face_detected if g.vision else False
+        if not face:
+            self._jt(img, "顔が見つかりません：カメラの正面へ", "no face", cx, y + h - 70, 15, BAD, "center")
+        self._jt(img, "SPACE / ENTER / クリックで始める", "SPACE / ENTER", cx, y + h - 42, 18, GOLD, "center",
+                 bold=True)
+
     def _text_game(self, fps):
         img = self.overlay_img
         g = self.g
@@ -742,7 +771,9 @@ class GameView:
 
         # ---- 視線同期・同期フェーズ・カウントダウン ----
         cx = W / 2
-        if g.state == "gaze_calib":
+        if g.state == "gaze_calib" and g.gaze_intro:
+            self._text_gaze_intro(img, g)
+        elif g.state == "gaze_calib":
             cal = g.gaze.calib
             # 何をしているかの説明（画面の上の中央。四隅の点・確認の点と重ならない高さ）
             check = cal.phase == "check"
@@ -751,14 +782,10 @@ class GameView:
             # 説明は HUD の帯の中に（9 点のいちばん上の列・確認の点と重ならない）
             self._jt(img, f"{title}　{min(cal.index + 1, n)} / {n}", "GAZE SYNC", cx, 1, 19,
                      GOLD if check else ACCENT, "center", bold=True)
+            # やり方の説明は、点を出す前の説明の画面で見せる（点を見ている間は、ここの文は読めないので）。ここは顔の警告だけ
             face = g.vision.get_state().face_detected if g.vision else False
             if not face:
-                guide = "顔が見つかりません：カメラの正面へ"
-            elif check:
-                guide = "金色の点を見つめてください。"
-            else:
-                guide = "光る点を、ゲーム中と同じように自然に見てください。あなたの目の動きと画面の位置を対応づけます。"
-            self._jt(img, guide, "look at the dot", cx, 27, 12, INK if face else BAD, "center")
+                self._jt(img, "顔が見つかりません：カメラの正面へ", "no face", cx, 27, 12, BAD, "center")
             if cal.tries > 0:
                 last = f"前回のずれ 約 {cal.check_error:.0f} 画素（{config.GAZE_CHECK_MAX_ERR:.0f} 以下で合格）→ {cal.tries + 1} 回目"
                 if cal.can_skip:
