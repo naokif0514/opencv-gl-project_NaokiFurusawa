@@ -389,6 +389,7 @@ cd 03_bci_game
 | `tools/make_shadow_textures.py` | 柔らかい影の画像を生成して `assets/textures/shadow_soft.png` に保存する | 新規 |
 | `tools/make_robot_model.py` | ロボットの 3D モデルを組み立てて `assets/models/robot.obj` に保存する（自作） | 新規 |
 | `tools/make_item_models.py` | 物（箱・缶・玉・ボーナス）とカゴの 3D モデルを組み立てて `assets/models/items.obj` に保存する（自作） | 新規 |
+| `tools/face_mesh_snapshot.py` | 発表スライド用：自分の顔に Face Mesh の点と黒目の輪を重ねた写真を撮り、「顔と黒目を検出」の図を作る。背景は白・紺・そのままから選べる（既定の保存先はリポジトリの外） | 新規 |
 | `field.py` | 机の上の物（種類・配置・補充・ボーナス・落ちてくる動き） | 新規 |
 | `mission.py` | ルール（得点・コンボ・電極劣化の予定・ボーナスの制限、ぶつかって落とす）、把持のヒステリシス | 新規 |
 | `rival.py` | チャレンジのライバル（行動、専用の擬似ニューロンとデコーダ、見つめて止める、ロボットどうしの押し合い） | 新規 |
